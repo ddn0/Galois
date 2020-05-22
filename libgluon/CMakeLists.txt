@@ -5,7 +5,7 @@ add_dependencies(lib galois_gluon)
 
 target_sources(galois_gluon PRIVATE
         src/cuda_device.cpp
-        src/SyncStructures.cpp
+        src/BitVector.cpp
         src/GlobalObj.cpp
         src/GluonSubstrate.cpp
 )

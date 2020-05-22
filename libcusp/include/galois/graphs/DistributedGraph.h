@@ -39,7 +39,6 @@
 /*
  * Headers for boost serialization
  */
-
 namespace galois {
 namespace graphs {
 /**
@@ -484,6 +483,16 @@ protected:
 
   uint64_t L2G(uint32_t lid) const { return localToGlobalVector[lid]; }
 
+  template <typename... Args>
+  constexpr static bool is_tuple(std::tuple<Args...>*) {
+    return true;
+  }
+
+  template <typename T>
+  constexpr static bool is_tuple(T*) {
+    return false;
+  }
+
 public:
   //! Type representing a node in this graph
   using GraphNode = typename GraphTy::GraphNode;
@@ -574,11 +583,20 @@ public:
    * @param mflag access flag for node data
    * @returns A node data object
    */
-  inline NodeTy&
+  template <typename NTy = NodeTy,
+            typename = std::enable_if_t<!is_tuple(static_cast<NTy*>(nullptr))>>
+  inline auto&
   getData(GraphNode N,
           galois::MethodFlag mflag = galois::MethodFlag::UNPROTECTED) {
-    auto& r = graph.getData(N, mflag);
-    return r;
+    return graph.getData(N, mflag);
+  }
+
+  template <size_t Index, typename NTy = NodeTy,
+            typename = std::enable_if_t<is_tuple(static_cast<NTy*>(nullptr))>>
+  auto&
+  getDataIndex(GraphNode N,
+               galois::MethodFlag mflag = galois::MethodFlag::UNPROTECTED) {
+    return std::get<Index>(graph.getData(N, mflag));
   }
 
   /**

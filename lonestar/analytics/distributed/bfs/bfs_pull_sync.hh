@@ -19,6 +19,6 @@
 
 #include "galois/runtime/SyncStructures.h"
 
-GALOIS_SYNC_STRUCTURE_REDUCE_SET(dist_current, unsigned int);
-GALOIS_SYNC_STRUCTURE_REDUCE_MIN(dist_current, unsigned int);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_SET(dist_current, NODE_DATA_DIST_CURRENT, unsigned int);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_MIN(dist_current, NODE_DATA_DIST_CURRENT, unsigned int);
 GALOIS_SYNC_STRUCTURE_BITSET(dist_current);

@@ -66,12 +66,16 @@ static cll::opt<Exec> execution(
 /******************************************************************************/
 
 static const float alpha = (1.0 - 0.85);
-struct NodeData {
-  float value;
-  std::atomic<uint32_t> nout;
-  float delta;
-  std::atomic<float> residual;
+
+enum {
+  NODE_DATA_VALUE,
+  NODE_DATA_NOUT,
+  NODE_DATA_RESIDUAL,
+  NODE_DATA_DELTA,
 };
+
+using NodeData =
+    std::tuple<float, std::atomic<uint32_t>, std::atomic<float>, float>;
 
 galois::DynamicBitSet bitset_residual;
 galois::DynamicBitSet bitset_nout;
@@ -116,11 +120,10 @@ struct ResetGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
-    sdata.value     = 0;
-    sdata.nout      = 0;
-    sdata.residual  = 0;
-    sdata.delta     = 0;
+    graph->getDataIndex<NODE_DATA_VALUE>(src)    = 0;
+    graph->getDataIndex<NODE_DATA_NOUT>(src)     = 0;
+    graph->getDataIndex<NODE_DATA_DELTA>(src)    = 0;
+    graph->getDataIndex<NODE_DATA_RESIDUAL>(src) = 0;
   }
 };
 
@@ -166,11 +169,13 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
-    sdata.residual  = local_alpha;
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
+    auto& nout     = graph->getDataIndex<NODE_DATA_NOUT>(src);
+
+    residual = local_alpha;
     uint32_t num_edges =
         std::distance(graph->edge_begin(src), graph->edge_end(src));
-    galois::atomicAdd(sdata.nout, num_edges);
+    galois::atomicAdd(nout, num_edges);
     bitset_nout.set(src);
   }
 };
@@ -208,15 +213,18 @@ struct PageRank_delta {
   }
 
   void operator()(WorkItem src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& value    = graph->getDataIndex<NODE_DATA_VALUE>(src);
+    auto& nout     = graph->getDataIndex<NODE_DATA_NOUT>(src);
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
+    auto& delta    = graph->getDataIndex<NODE_DATA_DELTA>(src);
 
-    if (sdata.residual > 0) {
-      float residual_old = sdata.residual;
-      sdata.residual     = 0;
-      sdata.value += residual_old;
+    if (residual > 0) {
+      float residual_old = residual;
+      residual           = 0;
+      value += residual_old;
       if (residual_old > this->local_tolerance) {
-        if (sdata.nout > 0) {
-          sdata.delta = residual_old * (1 - local_alpha) / sdata.nout;
+        if (nout > 0) {
+          delta = residual_old * (1 - local_alpha) / nout;
         }
       }
     }
@@ -288,18 +296,19 @@ struct PageRank {
   }
 
   void operator()(WorkItem src) const {
-    NodeData& sdata = graph->getData(src);
-    if (sdata.delta > 0) {
-      float _delta = sdata.delta;
-      sdata.delta  = 0;
+    auto& delta = graph->getDataIndex<NODE_DATA_DELTA>(src);
+
+    if (delta > 0) {
+      float _delta = delta;
+      delta        = 0;
 
       active_vertices += 1; // this should be moved to Pagerank_delta operator
 
       for (auto nbr : graph->edges(src)) {
-        GNode dst       = graph->getEdgeDst(nbr);
-        NodeData& ddata = graph->getData(dst);
+        GNode dst      = graph->getEdgeDst(nbr);
+        auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(dst);
 
-        galois::atomicAdd(ddata.residual, _delta);
+        galois::atomicAdd(residual, _delta);
 
         bitset_residual.set(dst);
       }
@@ -413,17 +422,18 @@ struct PageRankSanity {
   /* Gets the max, min rank from all owned nodes and
    * also the sum of ranks */
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& value    = graph->getDataIndex<NODE_DATA_VALUE>(src);
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
 
-    max_value.update(sdata.value);
-    min_value.update(sdata.value);
-    max_residual.update(sdata.residual);
-    min_residual.update(sdata.residual);
+    max_value.update(value);
+    min_value.update(value);
+    max_residual.update(residual);
+    min_residual.update(residual);
 
-    DGAccumulator_sum += sdata.value;
-    DGAccumulator_sum_residual += sdata.residual;
+    DGAccumulator_sum += value;
+    DGAccumulator_sum_residual += residual;
 
-    if (sdata.residual > local_tolerance) {
+    if (residual > local_tolerance) {
       DGAccumulator_residual_over_tolerance += 1;
     }
   }
@@ -438,7 +448,8 @@ std::vector<float> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).value);
+    auto& value = hg->getDataIndex<NODE_DATA_VALUE>(node);
+    values.push_back(value);
   }
 
   return values;
@@ -478,7 +489,7 @@ constexpr static const char* const name = "PageRank - Compiler Generated "
                                           "Distributed Heterogeneous";
 constexpr static const char* const desc = "Residual PageRank on Distributed "
                                           "Galois.";
-constexpr static const char* const url = 0;
+constexpr static const char* const url = nullptr;
 
 int main(int argc, char** argv) {
   galois::DistMemSys G;

@@ -31,7 +31,7 @@
 
 #include "galois/runtime/GlobalObj.h"
 #include "galois/runtime/DistStats.h"
-#include "galois/runtime/SyncStructures.h"
+#include "galois/runtime/BitVector.h"
 #include "galois/runtime/DataCommMode.h"
 #include "galois/DynamicBitset.h"
 
@@ -1049,11 +1049,11 @@ private:
   template <typename FnTy, SyncType syncType>
   inline typename FnTy::ValTy extractWrapper(size_t lid) {
     if (syncType == syncReduce) {
-      auto val = FnTy::extract(lid, userGraph.getData(lid));
-      FnTy::reset(lid, userGraph.getData(lid));
+      auto val = FnTy::extract(lid, userGraph);
+      FnTy::reset(lid, userGraph);
       return val;
     } else {
-      return FnTy::extract(lid, userGraph.getData(lid));
+      return FnTy::extract(lid, userGraph);
     }
   }
 
@@ -1075,11 +1075,11 @@ private:
   template <typename FnTy, SyncType syncType>
   inline typename FnTy::ValTy extractWrapper(size_t lid, unsigned vecIndex) {
     if (syncType == syncReduce) {
-      auto val = FnTy::extract(lid, userGraph.getData(lid), vecIndex);
-      FnTy::reset(lid, userGraph.getData(lid), vecIndex);
+      auto val = FnTy::extract(lid, userGraph, vecIndex);
+      FnTy::reset(lid, userGraph, vecIndex);
       return val;
     } else {
-      return FnTy::extract(lid, userGraph.getData(lid), vecIndex);
+      return FnTy::extract(lid, userGraph, vecIndex);
     }
   }
 
@@ -1348,15 +1348,15 @@ private:
   inline void setWrapper(size_t lid, typename FnTy::ValTy val,
                          galois::DynamicBitSet& bit_set_compute) {
     if (syncType == syncReduce) {
-      if (FnTy::reduce(lid, userGraph.getData(lid), val)) {
+      if (FnTy::reduce(lid, userGraph, val)) {
         if (bit_set_compute.size() != 0)
           bit_set_compute.set(lid);
       }
     } else {
       if (async)
-        FnTy::reduce(lid, userGraph.getData(lid), val);
+        FnTy::reduce(lid, userGraph, val);
       else
-        FnTy::setVal(lid, userGraph.getData(lid), val);
+        FnTy::setVal(lid, userGraph, val);
     }
   }
 
@@ -1381,15 +1381,15 @@ private:
                          galois::DynamicBitSet& bit_set_compute,
                          unsigned vecIndex) {
     if (syncType == syncReduce) {
-      if (FnTy::reduce(lid, userGraph.getData(lid), val, vecIndex)) {
+      if (FnTy::reduce(lid, userGraph, val, vecIndex)) {
         if (bit_set_compute.size() != 0)
           bit_set_compute.set(lid);
       }
     } else {
       if (async)
-        FnTy::reduce(lid, userGraph.getData(lid), val, vecIndex);
+        FnTy::reduce(lid, userGraph, val, vecIndex);
       else
-        FnTy::setVal(lid, userGraph.getData(lid), val, vecIndex);
+        FnTy::setVal(lid, userGraph, val, vecIndex);
     }
   }
 
@@ -3521,7 +3521,7 @@ public:
       if (!batch_succeeded) {
         galois::do_all(
             galois::iterate(r.first, r.second),
-            [&](uint32_t lid) { FnTy::reset(lid, userGraph.getData(lid)); },
+            [&](uint32_t lid) { FnTy::reset(lid, userGraph); },
             galois::no_stats(),
             galois::loopname(get_run_identifier("RESET:MIRRORS").c_str()));
       }

@@ -60,10 +60,12 @@ static cll::opt<Exec> execution(
 /* Graph structure declarations + other initialization */
 /******************************************************************************/
 
-struct NodeData {
-  std::atomic<uint32_t> comp_current;
-  uint32_t comp_old;
+enum {
+  NODE_DATA_COMP_CURRENT,
+  NODE_DATA_COMP_OLD,
 };
+
+using NodeData = std::tuple<std::atomic<uint32_t>, uint32_t>;
 
 galois::DynamicBitSet bitset_comp_current;
 
@@ -107,9 +109,11 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata    = graph->getData(src);
-    sdata.comp_current = graph->getGID(src);
-    sdata.comp_old     = graph->getGID(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
+    auto& comp_old     = graph->getDataIndex<NODE_DATA_COMP_OLD>(src);
+
+    comp_current = graph->getGID(src);
+    comp_old     = graph->getGID(src);
   }
 };
 
@@ -150,14 +154,16 @@ struct FirstItr_ConnectedComp {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
-    snode.comp_old  = snode.comp_current;
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
+    auto& comp_old     = graph->getDataIndex<NODE_DATA_COMP_OLD>(src);
+
+    comp_old = comp_current;
 
     for (auto jj : graph->edges(src)) {
-      GNode dst         = graph->getEdgeDst(jj);
-      auto& dnode       = graph->getData(dst);
-      uint32_t new_dist = snode.comp_current;
-      uint32_t old_dist = galois::atomicMin(dnode.comp_current, new_dist);
+      GNode dst              = graph->getEdgeDst(jj);
+      auto& dst_comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(dst);
+      uint32_t new_dist      = comp_current;
+      uint32_t old_dist      = galois::atomicMin(dst_comp_current, new_dist);
       if (old_dist > new_dist)
         bitset_comp_current.set(dst);
     }
@@ -227,18 +233,20 @@ struct ConnectedComp {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
+    auto& comp_old     = graph->getDataIndex<NODE_DATA_COMP_OLD>(src);
 
-    if (snode.comp_old > snode.comp_current) {
-      snode.comp_old = snode.comp_current;
+    if (comp_old > comp_current) {
+      comp_old = comp_current;
 
       for (auto jj : graph->edges(src)) {
         active_vertices += 1;
 
-        GNode dst         = graph->getEdgeDst(jj);
-        auto& dnode       = graph->getData(dst);
-        uint32_t new_dist = snode.comp_current;
-        uint32_t old_dist = galois::atomicMin(dnode.comp_current, new_dist);
+        GNode dst = graph->getEdgeDst(jj);
+        auto& dst_comp_current =
+            graph->getDataIndex<NODE_DATA_COMP_CURRENT>(dst);
+        uint32_t new_dist = comp_current;
+        uint32_t old_dist = galois::atomicMin(dst_comp_current, new_dist);
         if (old_dist > new_dist)
           bitset_comp_current.set(dst);
       }
@@ -288,9 +296,9 @@ struct ConnectedCompSanityCheck {
   /* Check if a node's component is the same as its ID.
    * if yes, then increment an accumulator */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
 
-    if (src_data.comp_current == graph->getGID(src)) {
+    if (comp_current == graph->getGID(src)) {
       active_vertices += 1;
     }
   }
@@ -305,7 +313,8 @@ std::vector<uint32_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).comp_current);
+    auto& comp_current = hg->getDataIndex<NODE_DATA_COMP_CURRENT>(node);
+    values.push_back(comp_current);
   }
 
   return values;

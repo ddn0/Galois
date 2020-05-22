@@ -66,12 +66,15 @@ static cll::opt<Exec> execution(
 /******************************************************************************/
 
 static const float alpha = (1.0 - 0.85);
-struct NodeData {
-  float value;
-  std::atomic<uint32_t> nout;
-  float residual;
-  float delta;
+
+enum {
+  NODE_DATA_VALUE,
+  NODE_DATA_NOUT,
+  NODE_DATA_RESIDUAL,
+  NODE_DATA_DELTA,
 };
+
+using NodeData = std::tuple<float, std::atomic<uint32_t>, float, float>;
 
 galois::DynamicBitSet bitset_residual;
 galois::DynamicBitSet bitset_nout;
@@ -119,11 +122,10 @@ struct ResetGraph {
   }
 
   void operator()(GNode src) const {
-    auto& sdata    = graph->getData(src);
-    sdata.value    = 0;
-    sdata.nout     = 0;
-    sdata.delta    = 0;
-    sdata.residual = local_alpha;
+    graph->getDataIndex<NODE_DATA_VALUE>(src)    = 0;
+    graph->getDataIndex<NODE_DATA_NOUT>(src)     = 0;
+    graph->getDataIndex<NODE_DATA_DELTA>(src)    = 0;
+    graph->getDataIndex<NODE_DATA_RESIDUAL>(src) = local_alpha;
   }
 };
 
@@ -167,9 +169,9 @@ struct InitializeGraph {
   // the tranpose graph for pull algorithms)
   void operator()(GNode src) const {
     for (auto nbr : graph->edges(src)) {
-      GNode dst   = graph->getEdgeDst(nbr);
-      auto& ddata = graph->getData(dst);
-      galois::atomicAdd(ddata.nout, (uint32_t)1);
+      GNode dst  = graph->getEdgeDst(nbr);
+      auto& nout = graph->getDataIndex<NODE_DATA_NOUT>(dst);
+      galois::atomicAdd(nout, (uint32_t)1);
       bitset_nout.set(dst);
     }
   }
@@ -217,18 +219,22 @@ struct PageRank_delta {
   }
 
   void operator()(GNode src) const {
-    auto& sdata = graph->getData(src);
-    sdata.delta = 0;
+    auto& value    = graph->getDataIndex<NODE_DATA_VALUE>(src);
+    auto& nout     = graph->getDataIndex<NODE_DATA_NOUT>(src);
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
+    auto& delta    = graph->getDataIndex<NODE_DATA_DELTA>(src);
 
-    if (sdata.residual > 0) {
-      sdata.value += sdata.residual;
-      if (sdata.residual > this->local_tolerance) {
-        if (sdata.nout > 0) {
-          sdata.delta = sdata.residual * (1 - local_alpha) / sdata.nout;
+    delta = 0;
+
+    if (residual > 0) {
+      value += residual;
+      if (residual > this->local_tolerance) {
+        if (nout > 0) {
+          delta = residual * (1 - local_alpha) / nout;
           active_vertices += 1;
         }
       }
-      sdata.residual = 0;
+      residual = 0;
     }
   }
 };
@@ -297,14 +303,14 @@ struct PageRank {
 
   // Pull deltas from neighbor nodes, then add to self-residual
   void operator()(GNode src) const {
-    auto& sdata = graph->getData(src);
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
 
     for (auto nbr : graph->edges(src)) {
       GNode dst   = graph->getEdgeDst(nbr);
-      auto& ddata = graph->getData(dst);
+      auto& delta = graph->getDataIndex<NODE_DATA_DELTA>(dst);
 
-      if (ddata.delta > 0) {
-        galois::add(sdata.residual, ddata.delta);
+      if (delta > 0) {
+        galois::add(residual, delta);
 
         bitset_residual.set(src);
       }
@@ -416,17 +422,18 @@ struct PageRankSanity {
   /* Gets the max, min rank from all owned nodes and
    * also the sum of ranks */
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& value    = graph->getDataIndex<NODE_DATA_VALUE>(src);
+    auto& residual = graph->getDataIndex<NODE_DATA_RESIDUAL>(src);
 
-    max_value.update(sdata.value);
-    min_value.update(sdata.value);
-    max_residual.update(sdata.residual);
-    min_residual.update(sdata.residual);
+    max_value.update(value);
+    min_value.update(value);
+    max_residual.update(residual);
+    min_residual.update(residual);
 
-    DGAccumulator_sum += sdata.value;
-    DGAccumulator_sum_residual += sdata.residual;
+    DGAccumulator_sum += value;
+    DGAccumulator_sum_residual += residual;
 
-    if (sdata.residual > local_tolerance) {
+    if (residual > local_tolerance) {
       DGAccumulator_residual_over_tolerance += 1;
     }
   }
@@ -437,7 +444,8 @@ std::vector<float> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).value);
+    auto& value = hg->getDataIndex<NODE_DATA_VALUE>(node);
+    values.push_back(value);
   }
 
   return values;

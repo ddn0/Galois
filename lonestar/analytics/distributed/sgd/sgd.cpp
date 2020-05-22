@@ -68,11 +68,13 @@ static cll::opt<double>
 static const double MINVAL = -1e+100;
 static const double MAXVAL = 1e+100;
 
-struct NodeData {
-
-  std::vector<galois::CopyableAtomic<double>> residual_latent_vector;
-  std::vector<double> latent_vector;
+enum {
+  NODE_DATA_RESIDUAL_LATENT_VECTOR,
+  NODE_DATA_LATENT_VECTOR,
 };
+
+using NodeData = std::tuple<std::vector<galois::CopyableAtomic<double>>,
+                            std::vector<double>>;
 
 typedef galois::graphs::DistGraph<NodeData, double> Graph;
 typedef typename Graph::GraphNode GNode;
@@ -80,6 +82,7 @@ typedef typename Graph::GraphNode GNode;
 galois::graphs::GluonSubstrate<Graph>* syncSubstrate;
 
 #include "sgd_sync.hh"
+
 // TODO: Set seed
 static double genRand() {
   // generate a random double in (-1,1)
@@ -94,9 +97,9 @@ double getstep_size(unsigned int round) {
 /**
  * Prediction of edge weight based on 2 latent vectors
  */
-double calcPrediction(const NodeData& movie_data, const NodeData& user_data) {
-  double pred = galois::innerProduct(movie_data.latent_vector,
-                                     user_data.latent_vector, 0.0);
+double calcPrediction(const std::vector<double>& movie_data,
+                      const std::vector<double>& user_data) {
+  double pred = galois::innerProduct(movie_data, user_data, 0.0);
 
   pred = std::min(MAXVAL, pred);
   pred = std::max(MINVAL, pred);
@@ -136,15 +139,17 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& latent_vector = graph->getDataIndex<NODE_DATA_LATENT_VECTOR>(src);
+    auto& residual_latent_vector =
+        graph->getDataIndex<NODE_DATA_RESIDUAL_LATENT_VECTOR>(src);
 
     // resize vectors
-    sdata.latent_vector.resize(LATENT_VECTOR_SIZE);
-    sdata.residual_latent_vector.resize(LATENT_VECTOR_SIZE);
+    latent_vector.resize(LATENT_VECTOR_SIZE);
+    residual_latent_vector.resize(LATENT_VECTOR_SIZE);
 
     for (int i = 0; i < LATENT_VECTOR_SIZE; i++) {
-      sdata.latent_vector[i] = genRand();  // randomly create latent vector
-      sdata.residual_latent_vector[i] = 0; // randomly create latent vector
+      latent_vector[i]          = genRand(); // randomly create latent vector
+      residual_latent_vector[i] = 0;         // randomly create latent vector
 
 #ifndef NDEBUG
       if (!std::isnormal(sdata.latent_vector[i]))
@@ -184,9 +189,9 @@ struct SGD_mergeResidual {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata              = graph->getData(src);
-    auto& latent_vector          = sdata.latent_vector;
-    auto& residual_latent_vector = sdata.residual_latent_vector;
+    auto& latent_vector = graph->getDataIndex<NODE_DATA_LATENT_VECTOR>(src);
+    auto& residual_latent_vector =
+        graph->getDataIndex<NODE_DATA_RESIDUAL_LATENT_VECTOR>(src);
 
     for (int i = 0; i < LATENT_VECTOR_SIZE; ++i) {
       latent_vector[i] += residual_latent_vector[i];
@@ -251,17 +256,18 @@ struct SGD {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata           = graph->getData(src);
-    auto& movie_node          = sdata.latent_vector;
-    auto& residual_movie_node = sdata.residual_latent_vector;
+    auto& movie_node = graph->getDataIndex<NODE_DATA_LATENT_VECTOR>(src);
+    auto& residual_movie_node =
+        graph->getDataIndex<NODE_DATA_RESIDUAL_LATENT_VECTOR>(src);
 
     for (auto jj = graph->edge_begin(src), ej = graph->edge_end(src); jj != ej;
          ++jj) {
-      GNode dst   = graph->getEdgeDst(jj);
-      auto& ddata = graph->getData(dst);
+      GNode dst = graph->getEdgeDst(jj);
 
-      auto& user_node          = ddata.latent_vector;
-      auto& residual_user_node = ddata.residual_latent_vector;
+      auto& user_node = graph->getDataIndex<NODE_DATA_LATENT_VECTOR>(dst);
+      auto& residual_user_node =
+          graph->getDataIndex<NODE_DATA_RESIDUAL_LATENT_VECTOR>(src);
+
       // auto& sdata_up = sdata.updates;
 
       double edge_rating = graph->getEdgeData(dst);

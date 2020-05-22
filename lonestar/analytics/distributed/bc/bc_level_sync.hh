@@ -1,7 +1,7 @@
 /*
- * This file belongs to the Galois project, a C++ library for exploiting parallelism.
- * The code is being released under the terms of the 3-Clause BSD License (a
- * copy is located in LICENSE.txt at the top-level directory).
+ * This file belongs to the Galois project, a C++ library for exploiting
+ * parallelism. The code is being released under the terms of the 3-Clause BSD
+ * License (a copy is located in LICENSE.txt at the top-level directory).
  *
  * Copyright (C) 2018, The University of Texas at Austin. All rights reserved.
  * UNIVERSITY EXPRESSLY DISCLAIMS ANY AND ALL WARRANTIES CONCERNING THIS
@@ -23,21 +23,26 @@
 // # short paths
 ////////////////////////////////////////////////////////////////////////////
 
-GALOIS_SYNC_STRUCTURE_REDUCE_ADD(num_shortest_paths, ShortPathType);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_ADD(num_shortest_paths,
+                                       NODE_DATA_NUM_SHORTEST_PATHS,
+                                       ShortPathType);
 // used for middle sync only
-GALOIS_SYNC_STRUCTURE_REDUCE_SET(num_shortest_paths, ShortPathType);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_SET(num_shortest_paths,
+                                       NODE_DATA_NUM_SHORTEST_PATHS,
+                                       ShortPathType);
 GALOIS_SYNC_STRUCTURE_BITSET(num_shortest_paths);
 
 ////////////////////////////////////////////////////////////////////////////
 // Current Lengths
 ////////////////////////////////////////////////////////////////////////////
 
-GALOIS_SYNC_STRUCTURE_REDUCE_MIN(current_length, uint32_t);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_MIN(current_length, NODE_DATA_CURRENT_LENGTH,
+                                       uint32_t);
 GALOIS_SYNC_STRUCTURE_BITSET(current_length);
 
 ////////////////////////////////////////////////////////////////////////////
 // Dependency
 ////////////////////////////////////////////////////////////////////////////
 
-GALOIS_SYNC_STRUCTURE_REDUCE_ADD(dependency, float);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_ADD(dependency, NODE_DATA_DEPENDENCY, float);
 GALOIS_SYNC_STRUCTURE_BITSET(dependency);

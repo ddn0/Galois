@@ -79,17 +79,20 @@ static cll::opt<unsigned int>
 /* Graph structure declarations */
 /******************************************************************************/
 
+enum {
+  NODE_DATA_SOURCE_DATA,
+  // distance map
+  NODE_DATA_D_TREE,
+  // final bc value
+  NODE_DATA_BC,
+  // index that needs to be pulled in a round
+  NODE_DATA_ROUND_INDEX_TO_SEND,
+};
+
 // NOTE: declared types assume that these values will not reach uint64_t: it may
 // need to be changed for very large graphs
-struct NodeData {
-  galois::gstl::Vector<BCData> sourceData;
-  // distance map
-  MRBCTree dTree;
-  // final bc value
-  float bc;
-  // index that needs to be pulled in a round
-  uint32_t roundIndexToSend;
-};
+using NodeData =
+    std::tuple<galois::gstl::Vector<BCData>, MRBCTree, float, uint32_t>;
 
 using Graph = galois::graphs::DistGraph<NodeData, void>;
 using GNode = typename Graph::GraphNode;
@@ -119,9 +122,10 @@ void InitializeGraph(Graph& graph) {
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode curNode) {
-        NodeData& cur_data = graph.getData(curNode);
-        cur_data.sourceData.resize(vectorSize);
-        cur_data.bc = 0.0;
+        auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(curNode);
+        auto& bc         = graph.getDataIndex<NODE_DATA_BC>(curNode);
+        sourceData.resize(vectorSize);
+        bc = 0.0;
       },
       galois::loopname(
           syncSubstrate->get_run_identifier("InitializeGraph").c_str()),
@@ -142,20 +146,24 @@ void InitializeIteration(Graph& graph,
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode curNode) {
-        NodeData& cur_data        = graph.getData(curNode);
-        cur_data.roundIndexToSend = infinity;
-        cur_data.dTree.initialize();
+        auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(curNode);
+        auto& roundIndexToSend =
+            graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(curNode);
+        auto& dTree = graph.getDataIndex<NODE_DATA_D_TREE>(curNode);
+
+        roundIndexToSend = infinity;
+        dTree.initialize();
         for (unsigned i = 0; i < numSourcesPerRound; i++) {
           // min distance and short path count setup
           if (nodesToConsider[i] == graph.getGID(curNode)) { // source node
-            cur_data.sourceData[i].minDistance     = 0;
-            cur_data.sourceData[i].shortPathCount  = 1;
-            cur_data.sourceData[i].dependencyValue = 0.0;
-            cur_data.dTree.setDistance(i, 0);
+            sourceData[i].minDistance     = 0;
+            sourceData[i].shortPathCount  = 1;
+            sourceData[i].dependencyValue = 0.0;
+            dTree.setDistance(i, 0);
           } else { // non-source node
-            cur_data.sourceData[i].minDistance     = infinity;
-            cur_data.sourceData[i].shortPathCount  = 0;
-            cur_data.sourceData[i].dependencyValue = 0.0;
+            sourceData[i].minDistance     = infinity;
+            sourceData[i].shortPathCount  = 0;
+            sourceData[i].dependencyValue = 0.0;
           }
         }
       },
@@ -180,15 +188,19 @@ void FindMessageToSync(Graph& graph, const uint32_t roundNumber,
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode curNode) {
-        NodeData& cur_data        = graph.getData(curNode);
-        cur_data.roundIndexToSend = cur_data.dTree.getIndexToSend(roundNumber);
+        auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(curNode);
+        auto& dTree      = graph.getDataIndex<NODE_DATA_D_TREE>(curNode);
+        auto& roundIndexToSend =
+            graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(curNode);
 
-        if (cur_data.roundIndexToSend != infinity) {
-          if (cur_data.sourceData[cur_data.roundIndexToSend].minDistance != 0) {
+        roundIndexToSend = dTree.getIndexToSend(roundNumber);
+
+        if (roundIndexToSend != infinity) {
+          if (sourceData[roundIndexToSend].minDistance != 0) {
             bitset_minDistances.set(curNode);
           }
           dga += 1;
-        } else if (cur_data.dTree.moreWork()) {
+        } else if (dTree.moreWork()) {
           dga += 1;
         }
       },
@@ -212,9 +224,11 @@ void ConfirmMessageToSend(Graph& graph, const uint32_t roundNumber) {
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode curNode) {
-        NodeData& cur_data = graph.getData(curNode);
-        if (cur_data.roundIndexToSend != infinity) {
-          cur_data.dTree.markSent(roundNumber);
+        auto& dTree = graph.getDataIndex<NODE_DATA_D_TREE>(curNode);
+        auto& roundIndexToSend =
+            graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(curNode);
+        if (roundIndexToSend != infinity) {
+          dTree.markSent(roundNumber);
         }
       },
       galois::loopname(syncSubstrate
@@ -237,15 +251,17 @@ void ConfirmMessageToSend(Graph& graph, const uint32_t roundNumber) {
  */
 void SendAPSPMessagesOp(GNode dst, Graph& graph,
                         galois::DGAccumulator<uint32_t>& dga) {
-  auto& dnode     = graph.getData(dst);
-  auto& dnodeData = dnode.sourceData;
+  auto& dnodeData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(dst);
+  auto& dTree     = graph.getDataIndex<NODE_DATA_D_TREE>(dst);
 
   for (auto inEdge : graph.edges(dst)) {
-    NodeData& src_data   = graph.getData(graph.getEdgeDst(inEdge));
-    uint32_t indexToSend = src_data.roundIndexToSend;
+    auto& snodeData =
+        graph.getDataIndex<NODE_DATA_SOURCE_DATA>(graph.getEdgeDst(inEdge));
+    auto& indexToSend = graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(
+        graph.getEdgeDst(inEdge));
 
     if (indexToSend != infinity) {
-      uint32_t distValue = src_data.sourceData[indexToSend].minDistance;
+      uint32_t distValue = snodeData[indexToSend].minDistance;
       uint32_t newValue  = distValue + 1;
       // Update minDistance vector
       auto& dnodeIndex  = dnodeData[indexToSend];
@@ -253,15 +269,13 @@ void SendAPSPMessagesOp(GNode dst, Graph& graph,
 
       if (oldValue > newValue) {
         dnodeIndex.minDistance = newValue;
-        dnode.dTree.setDistance(indexToSend, oldValue, newValue);
+        dTree.setDistance(indexToSend, oldValue, newValue);
         // overwrite short path with this node's shortest path
-        dnodeIndex.shortPathCount =
-            src_data.sourceData[indexToSend].shortPathCount;
+        dnodeIndex.shortPathCount = snodeData[indexToSend].shortPathCount;
       } else if (oldValue == newValue) {
-        assert(src_data.sourceData[indexToSend].shortPathCount != 0);
+        assert(snodeData[indexToSend].shortPathCount != 0);
         // add to short path
-        dnodeIndex.shortPathCount +=
-            src_data.sourceData[indexToSend].shortPathCount;
+        dnodeIndex.shortPathCount += snodeData[indexToSend].shortPathCount;
       }
 
       dga += 1;
@@ -335,8 +349,8 @@ void RoundUpdate(Graph& graph) {
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode node) {
-        NodeData& cur_data = graph.getData(node);
-        cur_data.dTree.prepForBackPhase();
+        auto& dTree = graph.getDataIndex<NODE_DATA_D_TREE>(node);
+        dTree.prepForBackPhase();
       },
       galois::loopname(
           syncSubstrate
@@ -358,19 +372,21 @@ void BackFindMessageToSend(Graph& graph, const uint32_t roundNumber,
   galois::do_all(
       galois::iterate(allNodes.begin(), allNodes.end()),
       [&](GNode dst) {
-        NodeData& dst_data = graph.getData(dst);
+        auto& dTree = graph.getDataIndex<NODE_DATA_D_TREE>(dst);
+        auto& roundIndexToSend =
+            graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(dst);
+        auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(dst);
 
         // if zero distances already reached, there is no point sending things
         // out since we don't care about dependecy for sources (i.e. distance
         // 0)
-        if (!dst_data.dTree.isZeroReached()) {
-          dst_data.roundIndexToSend =
-              dst_data.dTree.backGetIndexToSend(roundNumber, lastRoundNumber);
+        if (!dTree.isZeroReached()) {
+          roundIndexToSend =
+              dTree.backGetIndexToSend(roundNumber, lastRoundNumber);
 
-          if (dst_data.roundIndexToSend != infinity) {
+          if (roundIndexToSend != infinity) {
             // only comm if not redundant 0
-            if (dst_data.sourceData[dst_data.roundIndexToSend]
-                    .dependencyValue != 0) {
+            if (sourceData[roundIndexToSend].dependencyValue != 0) {
               bitset_dependency.set(dst);
             }
           }
@@ -391,25 +407,27 @@ void BackFindMessageToSend(Graph& graph, const uint32_t roundNumber,
  * @param lastRoundNumber last round number in the APSP phase
  */
 void BackPropOp(GNode dst, Graph& graph) {
-  NodeData& dst_data = graph.getData(dst);
-  unsigned i         = dst_data.roundIndexToSend;
+  auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(dst);
+  auto& roundIndexToSend =
+      graph.getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(dst);
+  unsigned i = roundIndexToSend;
 
   if (i != infinity) {
-    uint32_t myDistance = dst_data.sourceData[i].minDistance;
+    uint32_t myDistance = sourceData[i].minDistance;
 
     // calculate final dependency value
-    dst_data.sourceData[i].dependencyValue =
-        dst_data.sourceData[i].dependencyValue *
-        dst_data.sourceData[i].shortPathCount;
+    sourceData[i].dependencyValue =
+        sourceData[i].dependencyValue * sourceData[i].shortPathCount;
 
     // get the value to add to predecessors
-    float toAdd = ((float)1 + dst_data.sourceData[i].dependencyValue) /
-                  dst_data.sourceData[i].shortPathCount;
+    float toAdd = ((float)1 + sourceData[i].dependencyValue) /
+                  sourceData[i].shortPathCount;
 
     for (auto inEdge : graph.edges(dst)) {
-      GNode src               = graph.getEdgeDst(inEdge);
-      auto& src_data          = graph.getData(src);
-      uint32_t sourceDistance = src_data.sourceData[i].minDistance;
+      GNode src       = graph.getEdgeDst(inEdge);
+      auto& otherData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(src);
+
+      uint32_t sourceDistance = otherData[i].minDistance;
 
       // source nodes of this batch (i.e. distance 0) can be safely
       // ignored
@@ -417,7 +435,7 @@ void BackPropOp(GNode dst, Graph& graph) {
         // determine if this source is a predecessor
         if (myDistance == (sourceDistance + 1)) {
           // add to dependency of predecessor using our finalized one
-          galois::atomicAdd(src_data.sourceData[i].dependencyValue, toAdd);
+          galois::atomicAdd(otherData[i].dependencyValue, toAdd);
         }
       }
     }
@@ -468,12 +486,13 @@ void BC(Graph& graph, const std::vector<uint64_t>& nodesToConsider) {
   galois::do_all(
       galois::iterate(masterNodes.begin(), masterNodes.end()),
       [&](GNode node) {
-        NodeData& cur_data = graph.getData(node);
+        auto& sourceData = graph.getDataIndex<NODE_DATA_SOURCE_DATA>(node);
+        auto& bc         = graph.getDataIndex<NODE_DATA_BC>(node);
 
         for (unsigned i = 0; i < numSourcesPerRound; i++) {
           // exclude sources themselves from BC calculation
           if (graph.getGID(node) != nodesToConsider[i]) {
-            cur_data.bc += cur_data.sourceData[i].dependencyValue;
+            bc += sourceData[i].dependencyValue;
           }
         }
       },
@@ -499,11 +518,11 @@ void Sanity(Graph& graph) {
       galois::iterate(graph.masterNodesRange().begin(),
                       graph.masterNodesRange().end()),
       [&](auto src) {
-        NodeData& sdata = graph.getData(src);
+        auto& bc = graph.getDataIndex<NODE_DATA_BC>(src);
 
-        DGA_max.update(sdata.bc);
-        DGA_min.update(sdata.bc);
-        DGA_sum += sdata.bc;
+        DGA_max.update(bc);
+        DGA_min.update(bc);
+        DGA_sum += bc;
       },
       galois::no_stats(), galois::loopname("Sanity"));
 
@@ -528,7 +547,8 @@ std::vector<float> makeResults(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).bc);
+    auto& bc = hg->getDataIndex<NODE_DATA_BC>(node);
+    values.push_back(bc);
   }
 
   return values;

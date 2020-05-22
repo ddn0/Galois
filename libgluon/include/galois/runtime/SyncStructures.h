@@ -24,132 +24,15 @@
  * field flags class used for on-demand synchronization.
  */
 
-#ifndef _SYNC_STRUCT_MACROS_
-#define _SYNC_STRUCT_MACROS_
+#pragma once
 
-#include <cstdint>                       // for uint types used below
-#include <galois/AtomicHelpers.h>        // for galois::max, min
-#include <galois/runtime/DataCommMode.h> // for galois::max, min
-#include <galois/gIO.h>                  // for GALOIS DIE
+#include "galois/runtime/BitVector.h"
 
-////////////////////////////////////////////////////////////////////////////////
-// Field flag class
-////////////////////////////////////////////////////////////////////////////////
+#include <galois/AtomicHelpers.h>
+#include <galois/gIO.h>
+#include <galois/runtime/DataCommMode.h>
 
-namespace galois {
-namespace runtime {
-
-/**
- * Bitvector status enum specifying validness of certain things in bitvector.
- */
-enum BITVECTOR_STATUS {
-  NONE_INVALID, //!< none of the bitvector is invalid
-  SRC_INVALID,  //!< sources on bitvector are invalid
-  DST_INVALID,  //!< destinations on bitvector are invalid
-  BOTH_INVALID  //< both source and destinations on bitvector are invalid
-};
-
-//! Return true if the sources are invalid in bitvector flag
-bool src_invalid(BITVECTOR_STATUS bv_flag);
-//! Return true if the destinations are invalid in bitvector flag
-bool dst_invalid(BITVECTOR_STATUS bv_flag);
-//! Marks sources invalid on passed in bitvector flag
-void make_src_invalid(BITVECTOR_STATUS* bv_flag);
-//! Marks destinations invalid on passed in bitvector flag
-void make_dst_invalid(BITVECTOR_STATUS* bv_flag);
-
-/**
- * Each field has a FieldFlags object that indicates synchronization status
- * of that field.
- */
-class FieldFlags {
-private:
-  uint8_t _s2s;
-  uint8_t _s2d;
-  uint8_t _d2s;
-  uint8_t _d2d;
-
-public:
-  /**
-   * Status of the bitvector in terms of if it can be used to sync the field
-   */
-  BITVECTOR_STATUS bitvectorStatus;
-  /**
-   * Field Flags constructor. Sets all flags to false and bitvector
-   * status to invalid.
-   */
-  FieldFlags() {
-    _s2s            = false;
-    _s2d            = false;
-    _d2s            = false;
-    _d2d            = false;
-    bitvectorStatus = BITVECTOR_STATUS::NONE_INVALID;
-  }
-
-  //! Return true if src2src is set
-  bool src_to_src() const { return _s2s; }
-
-  //! Return true if src2dst is set
-  bool src_to_dst() const { return _s2d; }
-
-  //! Return true if dst2src is set
-  bool dst_to_src() const { return _d2s; }
-
-  //! Return true if dst2dst is set
-  bool dst_to_dst() const { return _d2d; }
-
-  //! Sets write src flags to true
-  void set_write_src() {
-    _s2s = true;
-    _s2d = true;
-  }
-
-  //! Sets write dst flags to true
-  void set_write_dst() {
-    _d2s = true;
-    _d2d = true;
-  }
-
-  //! Sets all write flags to true
-  void set_write_any() {
-    _s2s = true;
-    _s2d = true;
-    _d2s = true;
-    _d2d = true;
-  }
-
-  //! Sets write src flags to false
-  void clear_read_src() {
-    _s2s = false;
-    _d2s = false;
-  }
-
-  //! Sets write dst flags to false
-  void clear_read_dst() {
-    _s2d = false;
-    _d2d = false;
-  }
-
-  //! Sets all write flags to false
-  void clear_read_any() {
-    _s2d = false;
-    _d2d = false;
-    _s2s = false;
-    _d2s = false;
-  }
-
-  //! Sets all write flags to false and sets bitvector stats to none invalid
-  void clear_all() {
-    _s2s            = false;
-    _s2d            = false;
-    _d2s            = false;
-    _d2d            = false;
-    bitvectorStatus = BITVECTOR_STATUS::NONE_INVALID;
-  }
-};
-
-} // end namespace runtime
-} // end namespace galois
+#include <cstdint>
 
 ////////////////////////////////////////////////////////////////////////////////
 // Reduce Add, Edges
@@ -380,11 +263,12 @@ public:
   struct Reduce_add_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
-      return node.fieldname;                                                   \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -436,16 +320,15 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA) {                                           \
         add_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
         return true;                                                           \
       }                                                                        \
       assert(personality == CPU);                                              \
-      {                                                                        \
-        galois::add(node.fieldname, y);                                        \
-        return true;                                                           \
-      }                                                                        \
+      galois::add(g.getData(node_id).fieldname, y);                            \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned from_id, uint8_t* y,                     \
@@ -469,18 +352,20 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t node_id, struct NodeData& node) {               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
       if (personality == GPU_CUDA) {                                           \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, (ValTy)0);              \
       } else if (personality == CPU)                                           \
-        galois::set(node.fieldname, (ValTy)0);                                 \
+        galois::set(g.getData(node_id).fieldname, (ValTy)0);                   \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
       else if (personality == CPU)                                             \
-        node.fieldname = y;                                                    \
+        g.getData(node_id).fieldname = y;                                      \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
@@ -500,8 +385,9 @@ public:
   struct Reduce_add_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t, const struct NodeData& node) {              \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
@@ -519,11 +405,10 @@ public:
                                                                                \
     static bool reset_batch(size_t, size_t) { return false; }                  \
                                                                                \
-    static bool reduce(uint32_t, struct NodeData& node, ValTy y) {             \
-      {                                                                        \
-        galois::add(node.fieldname, y);                                        \
-        return true;                                                           \
-      }                                                                        \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::add(g.getData(node_id).fieldname, y);                            \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -534,12 +419,67 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t, struct NodeData& node) {                       \
-      galois::set(node.fieldname, (ValTy)0);                                   \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::set(g.getData(node_id).fieldname, (ValTy)0);                     \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t, struct NodeData& node, ValTy y) {             \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
+    }                                                                          \
+                                                                               \
+    static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+  }
+// Non-GPU code
+#define GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_ADD(fieldname, index, fieldtype)    \
+  struct Reduce_add_##fieldname {                                              \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.template getDataIndex<index>(node_id);                          \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*) { return false; }            \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*, size_t*,               \
+                                    DataCommMode*) {                           \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*) { return false; }      \
+                                                                               \
+    static bool reset_batch(size_t, size_t) { return false; }                  \
+                                                                               \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::add(g.template getDataIndex<index>(node_id), y);                 \
+      return true;                                                             \
+    }                                                                          \
+                                                                               \
+    static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {        \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::set(g.template getDataIndex<index>(node_id), (ValTy)0);          \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.template getDataIndex<index>(node_id) = y;                             \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -558,7 +498,7 @@ public:
   struct Reduce_add_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
@@ -614,7 +554,7 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA) {                                           \
         add_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
@@ -648,15 +588,14 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t node_id,                                        \
-                      struct NodeData& GALOIS_UNUSED(node)) {                  \
+    static void reset(uint32_t node_id, NodeData& GALOIS_UNUSED(node)) {       \
       if (personality == GPU_CUDA) {                                           \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, (ValTy)0);              \
       } else if (personality == CPU)                                           \
         galois::set(fieldname[node_id], (ValTy)0);                             \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
@@ -681,7 +620,7 @@ public:
   struct Reduce_add_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       return fieldname[node_id];                                               \
     }                                                                          \
                                                                                \
@@ -706,7 +645,7 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       {                                                                        \
         galois::add(fieldname[node_id], y);                                    \
@@ -724,12 +663,11 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t node_id,                                        \
-                      struct NodeData& GALOIS_UNUSED(node)) {                  \
+    static void reset(uint32_t node_id, NodeData& GALOIS_UNUSED(node)) {       \
       galois::set(fieldname[node_id], (ValTy)0);                               \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       fieldname[node_id] = y;                                                  \
     }                                                                          \
@@ -754,11 +692,12 @@ public:
   struct Reduce_set_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
-      return node.fieldname;                                                   \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -805,14 +744,15 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA) {                                           \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
         return true;                                                           \
       }                                                                        \
       assert(personality == CPU);                                              \
       {                                                                        \
-        galois::set(node.fieldname, y);                                        \
+        galois::set(g.getData(node_id).fieldname, y);                          \
         return true;                                                           \
       }                                                                        \
     }                                                                          \
@@ -838,14 +778,16 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
+    template <typename Graph>                                                  \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      Graph& GALOIS_UNUSED(g)) {}                              \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
       else if (personality == CPU)                                             \
-        node.fieldname = y;                                                    \
+        g.getData(node_id).fieldname = y;                                      \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
@@ -865,8 +807,9 @@ public:
   struct Reduce_set_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t, const struct NodeData& node) {              \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
@@ -884,11 +827,10 @@ public:
                                                                                \
     static bool reset_batch(size_t, size_t) { return true; }                   \
                                                                                \
-    static bool reduce(uint32_t, struct NodeData& node, ValTy y) {             \
-      {                                                                        \
-        galois::set(node.fieldname, y);                                        \
-        return true;                                                           \
-      }                                                                        \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::set(g.getData(node_id).fieldname, y);                            \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -899,10 +841,62 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t, struct NodeData&) {}                           \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t, Graph&) {}                                     \
                                                                                \
-    static void setVal(uint32_t, struct NodeData& node, ValTy y) {             \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
+    }                                                                          \
+                                                                               \
+    static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+  }
+#define GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_SET(fieldname, index, fieldtype)    \
+  struct Reduce_set_##fieldname {                                              \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.template getDataIndex<index>(node_id);                          \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*) { return false; }            \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*, size_t*,               \
+                                    DataCommMode*) {                           \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*) { return false; }      \
+                                                                               \
+    static bool reset_batch(size_t, size_t) { return true; }                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::set(g.template getDataIndex<index>(node_id), y);                 \
+      return true;                                                             \
+    }                                                                          \
+                                                                               \
+    static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {        \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t, Graph&) {}                                     \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.template getDataIndex<index>(node_id) = y;                             \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -921,7 +915,7 @@ public:
   struct Reduce_set_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
@@ -972,7 +966,7 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA) {                                           \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
@@ -1007,9 +1001,9 @@ public:
     }                                                                          \
                                                                                \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      NodeData& GALOIS_UNUSED(node)) {}                        \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
@@ -1034,7 +1028,7 @@ public:
   struct Reduce_set_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       return fieldname[node_id];                                               \
     }                                                                          \
                                                                                \
@@ -1059,7 +1053,7 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       {                                                                        \
         galois::set(fieldname[node_id], y);                                    \
@@ -1078,9 +1072,9 @@ public:
     }                                                                          \
                                                                                \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      NodeData& GALOIS_UNUSED(node)) {}                        \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       fieldname[node_id] = y;                                                  \
     }                                                                          \
@@ -1105,11 +1099,12 @@ public:
   struct Reduce_min_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
-      return node.fieldname;                                                   \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -1156,12 +1151,13 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA) {                                           \
         return y < min_node_##fieldname##_cuda(cuda_ctx, node_id, y);          \
       }                                                                        \
       assert(personality == CPU);                                              \
-      { return y < galois::min(node.fieldname, y); }                           \
+      return y < galois::min(g.getData(node_id).fieldname, y);                 \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned from_id, uint8_t* y,                     \
@@ -1185,14 +1181,16 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
+    template <typename Graph>                                                  \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      Graph& GALOIS_UNUSED(g)) {}                              \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
       else if (personality == CPU)                                             \
-        node.fieldname = y;                                                    \
+        g.getData(node_id).fieldname = y;                                      \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
@@ -1212,8 +1210,9 @@ public:
   struct Reduce_min_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t, const struct NodeData& node) {              \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
@@ -1231,8 +1230,9 @@ public:
                                                                                \
     static bool reset_batch(size_t, size_t) { return true; }                   \
                                                                                \
-    static bool reduce(uint32_t, struct NodeData& node, ValTy y) {             \
-      { return y < galois::min(node.fieldname, y); }                           \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      return y < galois::min(g.getData(node_id).fieldname, y);                 \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1243,10 +1243,61 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t, struct NodeData&) {}                           \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t, Graph&) {}                                     \
                                                                                \
-    static void setVal(uint32_t, struct NodeData& node, ValTy y) {             \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
+    }                                                                          \
+                                                                               \
+    static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+  }
+#define GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_MIN(fieldname, index, fieldtype)    \
+  struct Reduce_min_##fieldname {                                              \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.template getDataIndex<index>(node_id);                          \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*) { return false; }            \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*, size_t*,               \
+                                    DataCommMode*) {                           \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*) { return false; }      \
+                                                                               \
+    static bool reset_batch(size_t, size_t) { return true; }                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      return y < galois::min(g.template getDataIndex<index>(node_id), y);      \
+    }                                                                          \
+                                                                               \
+    static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {        \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t, Graph&) {}                                     \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.template getDataIndex<index>(node_id) = y;                             \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1268,11 +1319,12 @@ public:
   struct Reduce_max_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
-      return node.fieldname;                                                   \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -1319,55 +1371,59 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA) {                                           \
         return y > max_node_##fieldname##_cuda(cuda_ctx, node_id, y);          \
       }                                                                        \
       assert(personality == CPU);                                              \
-      { return y > galois::max(node.fieldname, y); }                           \
+      return y > galois::max(g.getData(node_id).fieldname, y);                 \
     }                                                                          \
+  }                                                                            \
                                                                                \
-    static bool reduce_batch(unsigned from_id, uint8_t* y,                     \
-                             DataCommMode data_mode) {                         \
-      if (personality == GPU_CUDA) {                                           \
-        batch_max_node_##fieldname##_cuda(cuda_ctx, from_id, y, data_mode);    \
-        return true;                                                           \
-      }                                                                        \
-      assert(personality == CPU);                                              \
-      return false;                                                            \
+  static bool                                                                  \
+  reduce_batch(unsigned from_id, uint8_t* y, DataCommMode data_mode) {         \
+    if (personality == GPU_CUDA) {                                             \
+      batch_max_node_##fieldname##_cuda(cuda_ctx, from_id, y, data_mode);      \
+      return true;                                                             \
     }                                                                          \
+    assert(personality == CPU);                                                \
+    return false;                                                              \
+  }                                                                            \
                                                                                \
-    static bool reduce_mirror_batch(unsigned from_id, uint8_t* y,              \
-                                    DataCommMode data_mode) {                  \
-      if (personality == GPU_CUDA) {                                           \
-        batch_max_mirror_node_##fieldname##_cuda(cuda_ctx, from_id, y,         \
-                                                 data_mode);                   \
-        return true;                                                           \
-      }                                                                        \
-      assert(personality == CPU);                                              \
-      return false;                                                            \
+  static bool reduce_mirror_batch(unsigned from_id, uint8_t* y,                \
+                                  DataCommMode data_mode) {                    \
+    if (personality == GPU_CUDA) {                                             \
+      batch_max_mirror_node_##fieldname##_cuda(cuda_ctx, from_id, y,           \
+                                               data_mode);                     \
+      return true;                                                             \
     }                                                                          \
+    assert(personality == CPU);                                                \
+    return false;                                                              \
+  }                                                                            \
                                                                                \
-    static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+  template <typename Graph>                                                    \
+  static void reset(uint32_t GALOIS_UNUSED(node_id),                           \
+                    Graph& GALOIS_UNUSED(g)) {}                                \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& node, ValTy y) {     \
-      if (personality == GPU_CUDA)                                             \
-        set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
-      else if (personality == CPU)                                             \
-        node.fieldname = y;                                                    \
+  template <typename Graph>                                                    \
+  static void setVal(uint32_t node_id, Graph& g, ValTy y) {                    \
+    if (personality == GPU_CUDA)                                               \
+      set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                       \
+    else if (personality == CPU)                                               \
+      g.getData(node_id).fieldname = y;                                        \
+  }                                                                            \
+                                                                               \
+  static bool setVal_batch(unsigned from_id, uint8_t* y,                       \
+                           DataCommMode data_mode) {                           \
+    if (personality == GPU_CUDA) {                                             \
+      batch_set_mirror_node_##fieldname##_cuda(cuda_ctx, from_id, y,           \
+                                               data_mode);                     \
+      return true;                                                             \
     }                                                                          \
-                                                                               \
-    static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
-                             DataCommMode data_mode) {                         \
-      if (personality == GPU_CUDA) {                                           \
-        batch_set_mirror_node_##fieldname##_cuda(cuda_ctx, from_id, y,         \
-                                                 data_mode);                   \
-        return true;                                                           \
-      }                                                                        \
-      assert(personality == CPU);                                              \
-      return false;                                                            \
-    }                                                                          \
+    assert(personality == CPU);                                                \
+    return false;                                                              \
+  }                                                                            \
   }
 #else
 // Non-GPU code
@@ -1375,8 +1431,9 @@ public:
   struct Reduce_max_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -1400,9 +1457,9 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t GALOIS_UNUSED(node_id), struct NodeData& node, \
-                       ValTy y) {                                              \
-      { return y > galois::max(node.fieldname, y); }                           \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      return y > galois::max(g.getData(node_id).fieldname, y);                 \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned from_id, uint8_t* y,                     \
@@ -1415,12 +1472,13 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
+    template <typename Graph>                                                  \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      Graph& GALOIS_UNUSED(g)) {}                              \
                                                                                \
-    static void setVal(uint32_t GALOIS_UNUSED(node_id), struct NodeData& node, \
-                       ValTy y) {                                              \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
@@ -1440,7 +1498,7 @@ public:
   struct Reduce_min_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
@@ -1491,7 +1549,7 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA) {                                           \
         return y < min_node_##fieldname##_cuda(cuda_ctx, node_id, y);          \
@@ -1522,9 +1580,9 @@ public:
     }                                                                          \
                                                                                \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      NodeData& GALOIS_UNUSED(node)) {}                        \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
@@ -1549,7 +1607,7 @@ public:
   struct Reduce_min_##fieldname {                                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    static ValTy extract(uint32_t node_id, const NodeData& node) {             \
       return fieldname[node_id];                                               \
     }                                                                          \
                                                                                \
@@ -1574,7 +1632,7 @@ public:
       return true;                                                             \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static bool reduce(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       { return y < galois::min(fieldname[node_id], y); }                       \
     }                                                                          \
@@ -1590,9 +1648,9 @@ public:
     }                                                                          \
                                                                                \
     static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& GALOIS_UNUSED(node)) {}                 \
+                      NodeData& GALOIS_UNUSED(node)) {}                        \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& GALOIS_UNUSED(node), \
+    static void setVal(uint32_t node_id, NodeData& GALOIS_UNUSED(node),        \
                        ValTy y) {                                              \
       fieldname[node_id] = y;                                                  \
     }                                                                          \
@@ -1614,11 +1672,12 @@ public:
   struct Reduce_pair_wise_avg_array_##fieldname {                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node) {      \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
       if (personality == GPU_CUDA)                                             \
         return get_node_##fieldname##_cuda(cuda_ctx, node_id);                 \
       assert(personality == CPU);                                              \
-      return node.fieldname;                                                   \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -1665,16 +1724,15 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA) {                                           \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
         return true;                                                           \
       }                                                                        \
       assert(personality == CPU);                                              \
-      {                                                                        \
-        galois::pairWiseAvg_vec(node.fieldname, y);                            \
-        return true;                                                           \
-      }                                                                        \
+      galois::pairWiseAvg_vec(g.getData(node_id).fieldname, y);                \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned from_id, uint8_t* y,                     \
@@ -1698,16 +1756,17 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t GALOIS_UNUSED(node_id),                         \
-                      struct NodeData& node) {                                 \
-      { galois::resetVec(node.fieldname); }                                    \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::resetVec(g.getData(node_id).fieldname);                          \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t node_id, struct NodeData& node, ValTy y) {     \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
       if (personality == GPU_CUDA)                                             \
         set_node_##fieldname##_cuda(cuda_ctx, node_id, y);                     \
       else if (personality == CPU)                                             \
-        node.fieldname = y;                                                    \
+        g.getData(node_id).fieldname = y;                                      \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned from_id, uint8_t* y,                     \
@@ -1727,8 +1786,9 @@ public:
   struct Reduce_pair_wise_avg_array_##fieldname {                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t, const struct NodeData& node) {              \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
@@ -1746,11 +1806,10 @@ public:
                                                                                \
     static bool reset_batch(size_t, size_t) { return false; }                  \
                                                                                \
-    static bool reduce(uint32_t, struct NodeData& node, ValTy y) {             \
-      {                                                                        \
-        galois::pairWiseAvg_vec(node.fieldname, y);                            \
-        return true;                                                           \
-      }                                                                        \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::pairWiseAvg_vec(g.getData(node_id).fieldname, y);                \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1761,12 +1820,68 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t, struct NodeData& node) {                       \
-      { galois::resetVec(node.fieldname); }                                    \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::resetVec(g.getData(node_id).fieldname);                          \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t, struct NodeData& node, ValTy y) {             \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
+    }                                                                          \
+                                                                               \
+    static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+  }
+
+#define GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_PAIR_WISE_AVG_ARRAY(                \
+    fieldname, index, fieldtype)                                               \
+  struct Reduce_pair_wise_avg_array_##fieldname {                              \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.template getDataIndex<index>(node_id);                          \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*) { return false; }            \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*, size_t*,               \
+                                    DataCommMode*) {                           \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*) { return false; }      \
+                                                                               \
+    static bool reset_batch(size_t, size_t) { return false; }                  \
+                                                                               \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::pairWiseAvg_vec(g.template getDataIndex<index>(node_id), y);     \
+      return true;                                                             \
+    }                                                                          \
+                                                                               \
+    static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {        \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::resetVec(g.template getDataIndex<index>(node_id));               \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getDataIndex<index>(node_id) = y;                                      \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1783,8 +1898,9 @@ public:
   struct Reduce_pair_wise_add_array_##fieldname {                              \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t, const struct NodeData& node) {              \
-      return node.fieldname;                                                   \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.getData(node_id).fieldname;                                     \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
@@ -1802,11 +1918,10 @@ public:
                                                                                \
     static bool reset_batch(size_t, size_t) { return false; }                  \
                                                                                \
-    static bool reduce(uint32_t, struct NodeData& node, ValTy y) {             \
-      {                                                                        \
-        galois::addArray(node.fieldname, y);                                   \
-        return true;                                                           \
-      }                                                                        \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::addArray(g.getData(node_id).fieldname, y);                       \
+      return true;                                                             \
     }                                                                          \
                                                                                \
     static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1817,12 +1932,68 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t, struct NodeData& node) {                       \
-      { galois::resetVec(node.fieldname); }                                    \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::resetVec(g.getData(node_id).fieldname);                          \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t, struct NodeData& node, ValTy y) {             \
-      node.fieldname = y;                                                      \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.getData(node_id).fieldname = y;                                        \
+    }                                                                          \
+                                                                               \
+    static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+  }
+
+#define GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_PAIR_WISE_ADD_ARRAY(                \
+    fieldname, index, fieldtype)                                               \
+  struct Reduce_pair_wise_add_array_##fieldname {                              \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g) {                         \
+      return g.template getDataIndex<index>(node_id);                          \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {    \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_batch(unsigned, uint8_t*) { return false; }            \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*, size_t*,               \
+                                    DataCommMode*) {                           \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool extract_reset_batch(unsigned, uint8_t*) { return false; }      \
+                                                                               \
+    static bool reset_batch(size_t, size_t) { return false; }                  \
+                                                                               \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y) {                  \
+      galois::addArray(g.template getDataIndex<index>(node_id), y);            \
+      return true;                                                             \
+    }                                                                          \
+                                                                               \
+    static bool reduce_batch(unsigned, uint8_t*, DataCommMode) {               \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {        \
+      return false;                                                            \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g) {                            \
+      galois::resetVec(g.template getDataIndex<index>(node_id));               \
+    }                                                                          \
+                                                                               \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y) {                  \
+      g.template getDataIndex<index>(node_id) = y;                             \
     }                                                                          \
                                                                                \
     static bool setVal_batch(unsigned, uint8_t*, DataCommMode) {               \
@@ -1839,9 +2010,9 @@ public:
   struct Reduce_pair_wise_add_array_single_##fieldname {                       \
     typedef fieldtype ValTy;                                                   \
                                                                                \
-    static ValTy extract(uint32_t node_id, const struct NodeData& node,        \
-                         unsigned vecIndex) {                                  \
-      return node.fieldname[vecIndex];                                         \
+    template <typename Graph>                                                  \
+    static ValTy extract(uint32_t node_id, Graph& g, unsigned vecIndex) {      \
+      return g.getData(node_id).fieldname[vecIndex];                           \
     }                                                                          \
                                                                                \
     static bool extract_batch(unsigned from_id, uint8_t* y, size_t* s,         \
@@ -1863,8 +2034,10 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static bool reduce(uint32_t GALOIS_UNUSED(node_id), struct NodeData& node, \
-                       ValTy y, unsigned vecIndex) {                           \
+    template <typename Graph>                                                  \
+    static bool reduce(uint32_t node_id, Graph& g, ValTy y,                    \
+                       unsigned vecIndex) {                                    \
+      auto& node               = g.getData(node_id);                           \
       node.fieldname[vecIndex] = node.fieldname[vecIndex] + y;                 \
       return true;                                                             \
     }                                                                          \
@@ -1878,18 +2051,22 @@ public:
       return false;                                                            \
     }                                                                          \
                                                                                \
-    static void reset(uint32_t GALOIS_UNUSED(node_id), struct NodeData& node,  \
-                      unsigned vecIndex) {                                     \
+    template <typename Graph>                                                  \
+    static void reset(uint32_t node_id, Graph& g, unsigned vecIndex) {         \
+      auto& node               = g.getData(node_id);                           \
       node.fieldname[vecIndex] = 0;                                            \
     }                                                                          \
                                                                                \
-    static void setVal(uint32_t GALOIS_UNUSED(node_id), struct NodeData& node, \
-                       ValTy y, unsigned vecIndex) {                           \
+    template <typename Graph>                                                  \
+    static void setVal(uint32_t node_id, Graph& g, ValTy y,                    \
+                       unsigned vecIndex) {                                    \
+      auto& node               = g.getData(node_id);                           \
       node.fieldname[vecIndex] = y;                                            \
     }                                                                          \
                                                                                \
+    template <typename Graph>                                                  \
     static void setVal(uint32_t GALOIS_UNUSED(node_id),                        \
-                       struct NodeData& GALOIS_UNUSED(node), ValTy y) {        \
+                       Graph& GALOIS_UNUSED(g), ValTy y) {                     \
       GALOIS_DIE("execution shouldn't get here; needs index arg");             \
     }                                                                          \
                                                                                \
@@ -1980,5 +2157,3 @@ public:
       }                                                                        \
     }                                                                          \
   }
-
-#endif // header guard

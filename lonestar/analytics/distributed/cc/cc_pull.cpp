@@ -60,9 +60,11 @@ static cll::opt<Exec> execution(
 /* Graph structure declarations + other initialization */
 /******************************************************************************/
 
-struct NodeData {
-  uint32_t comp_current;
+enum {
+  NODE_DATA_COMP_CURRENT,
 };
+
+using NodeData = std::tuple<uint32_t>;
 
 galois::DynamicBitSet bitset_comp_current;
 
@@ -107,8 +109,9 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata    = graph->getData(src);
-    sdata.comp_current = graph->getGID(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
+
+    comp_current = graph->getGID(src);
   }
 };
 
@@ -172,13 +175,13 @@ struct ConnectedComp {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
 
     for (auto jj : graph->edges(src)) {
-      GNode dst         = graph->getEdgeDst(jj);
-      auto& dnode       = graph->getData(dst);
-      uint32_t new_comp = dnode.comp_current;
-      uint32_t old_comp = galois::min(snode.comp_current, new_comp);
+      GNode dst              = graph->getEdgeDst(jj);
+      auto& dst_comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(dst);
+      uint32_t new_comp      = dst_comp_current;
+      uint32_t old_comp      = galois::min(comp_current, new_comp);
       if (old_comp > new_comp) {
         bitset_comp_current.set(src);
         active_vertices += 1;
@@ -229,9 +232,9 @@ struct ConnectedCompSanityCheck {
   /* Check if a node's component is the same as its ID.
    * if yes, then increment an accumulator */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& comp_current = graph->getDataIndex<NODE_DATA_COMP_CURRENT>(src);
 
-    if (src_data.comp_current == graph->getGID(src)) {
+    if (comp_current == graph->getGID(src)) {
       active_vertices += 1;
     }
   }
@@ -246,7 +249,8 @@ std::vector<uint32_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).comp_current);
+    auto& comp_current = hg->getDataIndex<NODE_DATA_COMP_CURRENT>(node);
+    values.push_back(comp_current);
   }
 
   return values;

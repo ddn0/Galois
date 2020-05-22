@@ -66,12 +66,14 @@ static cll::opt<Exec> execution(
 /* Graph structure declarations + other inits */
 /******************************************************************************/
 
-struct NodeData {
-  uint32_t current_degree;
-  uint32_t trim;
-  uint8_t flag;
-  uint8_t pull_flag;
+enum {
+  NODE_DATA_CURRENT_DEGREE,
+  NODE_DATA_TRIM,
+  NODE_DATA_FLAG,
+  NODE_DATA_PULL_FLAG,
 };
+
+using NodeData = std::tuple<uint32_t, uint32_t, uint8_t, uint8_t>;
 
 typedef galois::graphs::DistGraph<NodeData, void> Graph;
 typedef typename Graph::GraphNode GNode;
@@ -127,9 +129,9 @@ struct DegreeCounting {
    * adding for every dest (works same way in pull version since it's a
    * symmetric graph) */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
 
-    src_data.current_degree =
+    current_degree =
         std::distance(graph->edge_begin(src), graph->edge_end(src));
     bitset_current_degree.set(src);
 
@@ -177,11 +179,15 @@ struct InitializeGraph {
 
   /* Setup intial fields */
   void operator()(GNode src) const {
-    NodeData& src_data      = graph->getData(src);
-    src_data.flag           = true;
-    src_data.trim           = 0;
-    src_data.current_degree = 0;
-    src_data.pull_flag      = false;
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
+    auto& trim           = graph->getDataIndex<NODE_DATA_TRIM>(src);
+    auto& flag           = graph->getDataIndex<NODE_DATA_FLAG>(src);
+    auto& pull_flag      = graph->getDataIndex<NODE_DATA_PULL_FLAG>(src);
+
+    current_degree = 0;
+    trim           = 0;
+    flag           = true;
+    pull_flag      = false;
   }
 };
 
@@ -237,31 +243,34 @@ struct LiveUpdate {
    * be pulled from more than once.
    */
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
+    auto& trim           = graph->getDataIndex<NODE_DATA_TRIM>(src);
+    auto& flag           = graph->getDataIndex<NODE_DATA_FLAG>(src);
+    auto& pull_flag      = graph->getDataIndex<NODE_DATA_PULL_FLAG>(src);
 
-    if (sdata.flag) {
-      if (sdata.trim > 0) {
-        sdata.current_degree = sdata.current_degree - sdata.trim;
+    if (flag) {
+      if (trim > 0) {
+        current_degree = current_degree - trim;
       }
 
-      if (sdata.current_degree < local_k_core_num) {
-        sdata.flag = false;
+      if (current_degree < local_k_core_num) {
+        flag = false;
         active_vertices += 1;
 
         // let neighbors pull from me next round
         // assert(sdata.pull_flag == false);
-        sdata.pull_flag = true;
+        pull_flag = true;
       }
     } else {
       // dead
-      if (sdata.pull_flag) {
+      if (pull_flag) {
         // do not allow neighbors to pull value from this node anymore
-        sdata.pull_flag = false;
+        pull_flag = false;
       }
     }
 
     // always reset trim
-    sdata.trim = 0;
+    trim = 0;
   }
 };
 
@@ -323,18 +332,19 @@ struct KCore {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& trim = graph->getDataIndex<NODE_DATA_TRIM>(src);
+    auto& flag = graph->getDataIndex<NODE_DATA_FLAG>(src);
 
     // only if node is alive we do things
-    if (src_data.flag) {
+    if (flag) {
       // if dst node is dead, increment trim by one so we can decrement
       // our degree later
       for (auto current_edge : graph->edges(src)) {
-        GNode dst          = graph->getEdgeDst(current_edge);
-        NodeData& dst_data = graph->getData(dst);
+        GNode dst           = graph->getEdgeDst(current_edge);
+        auto& dst_pull_flag = graph->getDataIndex<NODE_DATA_PULL_FLAG>(dst);
 
-        if (dst_data.pull_flag) {
-          galois::add(src_data.trim, (uint32_t)1);
+        if (dst_pull_flag) {
+          galois::add(trim, uint32_t{1});
           bitset_trim.set(src);
         }
       }
@@ -384,9 +394,9 @@ struct KCoreSanityCheck {
 
   /* Check if an owned node is alive/dead: increment appropriate accumulator */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& flag = graph->getDataIndex<NODE_DATA_FLAG>(src);
 
-    if (src_data.flag) {
+    if (flag) {
       active_vertices += 1;
     }
   }
@@ -401,7 +411,8 @@ std::vector<uint8_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).flag);
+    auto& flag = hg->getDataIndex<NODE_DATA_FLAG>(node);
+    values.push_back(flag);
   }
 
   return values;

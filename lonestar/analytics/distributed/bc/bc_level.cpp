@@ -81,23 +81,19 @@ static uint64_t current_src_node = 0;
 uint32_t globalRoundNumber = 0;
 uint32_t backRoundCount    = 0;
 
+enum {
+  // SSSP vars
+  NODE_DATA_CURRENT_LENGTH,
+  // Betweeness centrality vars
+  NODE_DATA_NUM_SHORTEST_PATHS,
+  NODE_DATA_DEPENDENCY,
+  NODE_DATA_BETWEENESS_CENTRALITY,
+};
+
 // NOTE: types assume that these values will not reach uint64_t: it may
 // need to be changed for very large graphs
-struct NodeData {
-  // SSSP vars
-  std::atomic<uint32_t> current_length;
-  // Betweeness centrality vars
-  std::atomic<ShortPathType> num_shortest_paths;
-  float dependency;
-  float betweeness_centrality;
-
-  //#ifdef BCDEBUG
-  void dump() {
-    galois::gPrint("DUMP: ", current_length.load(), " ",
-                   num_shortest_paths.load(), " ", dependency, "\n");
-  }
-  //#endif
-};
+using NodeData =
+    std::tuple<std::atomic<uint32_t>, std::atomic<ShortPathType>, float, float>;
 
 // reading in list of sources to operate on if provided
 std::ifstream sourceFile;
@@ -152,11 +148,9 @@ struct InitializeGraph {
   /* Functor passed into the Galois operator to carry out initialization;
    * reset everything */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
-
-    src_data.betweeness_centrality = 0;
-    src_data.num_shortest_paths    = 0;
-    src_data.dependency            = 0;
+    graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(src)    = 0;
+    graph->getDataIndex<NODE_DATA_DEPENDENCY>(src)            = 0;
+    graph->getDataIndex<NODE_DATA_BETWEENESS_CENTRALITY>(src) = 0;
   }
 };
 
@@ -201,18 +195,21 @@ struct InitializeIteration {
   /* Functor passed into the Galois operator to carry out reset of node data
    * (aside from betweeness centrality measure */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_length = graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(src);
+    auto& num_shortest_paths =
+        graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(src);
+    auto& dependency = graph->getDataIndex<NODE_DATA_DEPENDENCY>(src);
 
     bool is_source = graph->getGID(src) == local_current_src_node;
 
     if (!is_source) {
-      src_data.current_length     = local_infinity;
-      src_data.num_shortest_paths = 0;
+      current_length     = local_infinity;
+      num_shortest_paths = 0;
     } else {
-      src_data.current_length     = 0;
-      src_data.num_shortest_paths = 1;
+      current_length     = 0;
+      num_shortest_paths = 1;
     }
-    src_data.dependency = 0;
+    dependency = 0;
   }
 };
 
@@ -288,31 +285,30 @@ struct ForwardPass {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_length = graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(src);
+    auto& num_shortest_paths =
+        graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(src);
 
-    if (src_data.current_length == local_r) {
+    if (current_length == local_r) {
       for (auto current_edge : graph->edges(src)) {
-        GNode dst         = graph->getEdgeDst(current_edge);
-        auto& dst_data    = graph->getData(dst);
-        uint32_t new_dist = 1 + src_data.current_length;
-        uint32_t old = galois::atomicMin(dst_data.current_length, new_dist);
+        GNode dst = graph->getEdgeDst(current_edge);
+        auto& dst_current_length =
+            graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(dst);
+        auto& dst_num_shortest_paths =
+            graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(dst);
+        uint32_t new_dist = 1 + current_length;
+        uint32_t old      = galois::atomicMin(dst_current_length, new_dist);
 
         if (old > new_dist) {
-          // assert(dst_data.current_length == r + 1);
-          // assert(src_data.num_shortest_paths > 0);
-
           bitset_current_length.set(dst);
-          double nsp = src_data.num_shortest_paths;
-          galois::atomicAdd(dst_data.num_shortest_paths, nsp);
+          double nsp = num_shortest_paths;
+          galois::atomicAdd(dst_num_shortest_paths, nsp);
           bitset_num_shortest_paths.set(dst);
 
           dga += 1;
         } else if (old == new_dist) {
-          // assert(src_data.num_shortest_paths > 0);
-          // assert(dst_data.current_length == r + 1);
-
-          double nsp = src_data.num_shortest_paths;
-          galois::atomicAdd(dst_data.num_shortest_paths, nsp);
+          double nsp = num_shortest_paths;
+          galois::atomicAdd(dst_num_shortest_paths, nsp);
           bitset_num_shortest_paths.set(dst);
 
           dga += 1;
@@ -366,9 +362,9 @@ struct MiddleSync {
    * Set node for sync if it has a non-zero distance
    */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_length = graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(src);
 
-    if (src_data.current_length != local_infinity) {
+    if (current_length != local_infinity) {
       bitset_num_shortest_paths.set(src);
     }
   }
@@ -425,22 +421,28 @@ struct BackwardPass {
    * nodes.
    */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_length = graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(src);
+    auto& num_shortest_paths =
+        graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(src);
+    auto& dependency = graph->getDataIndex<NODE_DATA_DEPENDENCY>(src);
 
-    if (src_data.current_length == local_r) {
-      uint32_t dest_to_find = src_data.current_length + 1;
+    if (current_length == local_r) {
+      uint32_t dest_to_find = current_length + 1;
       for (auto current_edge : graph->edges(src)) {
-        GNode dst      = graph->getEdgeDst(current_edge);
-        auto& dst_data = graph->getData(dst);
+        GNode dst = graph->getEdgeDst(current_edge);
+        auto& dst_current_length =
+            graph->getDataIndex<NODE_DATA_CURRENT_LENGTH>(dst);
+        auto& dst_num_shortest_paths =
+            graph->getDataIndex<NODE_DATA_NUM_SHORTEST_PATHS>(dst);
+        auto& dst_dependency = graph->getDataIndex<NODE_DATA_DEPENDENCY>(dst);
 
-        if (dest_to_find == dst_data.current_length) {
-          float contrib =
-              ((float)1 + dst_data.dependency) / dst_data.num_shortest_paths;
-          src_data.dependency = src_data.dependency + contrib;
+        if (dest_to_find == dst_current_length) {
+          float contrib = (1.0 + dst_dependency) / dst_num_shortest_paths;
+          dependency    = dependency + contrib;
           bitset_dependency.set(src);
         }
       }
-      src_data.dependency *= src_data.num_shortest_paths;
+      dependency *= num_shortest_paths;
     }
   }
 };
@@ -491,10 +493,12 @@ struct BC {
    * Adds dependency measure to BC measure
    */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& dependency = graph->getDataIndex<NODE_DATA_DEPENDENCY>(src);
+    auto& betweeness_centrality =
+        graph->getDataIndex<NODE_DATA_BETWEENESS_CENTRALITY>(src);
 
-    if (src_data.dependency > 0) {
-      src_data.betweeness_centrality += src_data.dependency;
+    if (dependency > 0) {
+      betweeness_centrality += dependency;
     }
   }
 };
@@ -562,11 +566,12 @@ struct Sanity {
   /* Gets the max, min rank from all owned nodes and
    * also the sum of ranks */
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
+    auto& betweeness_centrality =
+        graph->getDataIndex<NODE_DATA_BETWEENESS_CENTRALITY>(src);
 
-    DGAccumulator_max.update(sdata.betweeness_centrality);
-    DGAccumulator_min.update(sdata.betweeness_centrality);
-    DGAccumulator_sum += sdata.betweeness_centrality;
+    DGAccumulator_max.update(betweeness_centrality);
+    DGAccumulator_min.update(betweeness_centrality);
+    DGAccumulator_sum += betweeness_centrality;
   }
 };
 
@@ -579,7 +584,9 @@ std::vector<float> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).betweeness_centrality);
+    auto& betweeness_centrality =
+        hg->getDataIndex<NODE_DATA_BETWEENESS_CENTRALITY>(node);
+    values.push_back(betweeness_centrality);
   }
 
   return values;

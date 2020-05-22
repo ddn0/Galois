@@ -1,7 +1,7 @@
 /*
- * This file belongs to the Galois project, a C++ library for exploiting parallelism.
- * The code is being released under the terms of the 3-Clause BSD License (a
- * copy is located in LICENSE.txt at the top-level directory).
+ * This file belongs to the Galois project, a C++ library for exploiting
+ * parallelism. The code is being released under the terms of the 3-Clause BSD
+ * License (a copy is located in LICENSE.txt at the top-level directory).
  *
  * Copyright (C) 2018, The University of Texas at Austin. All rights reserved.
  * UNIVERSITY EXPRESSLY DISCLAIMS ANY AND ALL WARRANTIES CONCERNING THIS
@@ -17,6 +17,8 @@
  * Documentation, or loss or inaccuracy of data of any kind.
  */
 
+#include "galois/runtime/SyncStructures.h"
+
 ////////////////////////////////////////////////////////////////////////////////
 // APSP synchronization
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,8 +26,13 @@
 struct APSPReduce {
   using ValTy = galois::TupleOfThree<uint32_t, uint32_t, ShortPathType>;
 
-  static ValTy extract(uint32_t, struct NodeData& node) {
-    uint32_t indexToGet = node.roundIndexToSend;
+  template <typename Graph>
+  static ValTy extract(uint32_t node_id, Graph& g) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+
+    uint32_t indexToGet = roundIndexToSend;
 
     uint32_t a;
     uint32_t b;
@@ -34,8 +41,8 @@ struct APSPReduce {
     a = indexToGet;
     if (indexToGet != infinity) {
       // get min distance and # shortest paths
-      b = node.sourceData[indexToGet].minDistance;
-      c = node.sourceData[indexToGet].shortPathCount;
+      b = sourceData[indexToGet].minDistance;
+      c = sourceData[indexToGet].shortPathCount;
     } else {
       // no-op
       b = infinity;
@@ -45,46 +52,54 @@ struct APSPReduce {
     return ValTy(a, b, c);
   }
 
-  static bool extract_batch(unsigned, uint8_t*, size_t*,
-                            DataCommMode*) { return false; }
+  static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {
+    return false;
+  }
 
   static bool extract_batch(unsigned, uint8_t*) { return false; }
 
-  static bool extract_reset_batch(unsigned, uint8_t*, size_t*,
-                                  DataCommMode*) { return false; }
+  static bool extract_reset_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {
+    return false;
+  }
 
   static bool extract_reset_batch(unsigned, uint8_t*) { return false; }
 
-  static bool reduce(uint32_t, struct NodeData& node, ValTy y) {
+  template <typename Graph>
+  static bool reduce(uint32_t node_id, Graph& g, ValTy y) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+    auto& dTree = g.template getDataIndex<NODE_DATA_D_TREE>(node_id);
+
     uint32_t rIndex = y.first;
 
     if (rIndex != infinity) {
-      uint32_t rDistance = y.second;
+      uint32_t rDistance      = y.second;
       ShortPathType rNumPaths = y.third;
 
       // do updates based on received numbers
-      uint32_t old = galois::min(node.sourceData[rIndex].minDistance, rDistance);
+      uint32_t old = galois::min(sourceData[rIndex].minDistance, rDistance);
 
       // reset shortest paths if min dist changed (i.e. don't add to it)
       if (old > rDistance) {
-        node.dTree.setDistance(rIndex, old, rDistance);
+        dTree.setDistance(rIndex, old, rDistance);
         assert(rNumPaths != 0);
-        node.sourceData[rIndex].shortPathCount = rNumPaths;
+        sourceData[rIndex].shortPathCount = rNumPaths;
       } else if (old == rDistance) {
         // add to short path
-        node.sourceData[rIndex].shortPathCount += rNumPaths;
+        sourceData[rIndex].shortPathCount += rNumPaths;
       }
 
-      // if received distance is smaller than current candidate for sending, send
-      // it out instead (if tie breaker wins i.e. lower in position)
-      if (node.roundIndexToSend == infinity ||
-          (node.sourceData[rIndex].minDistance <
-            node.sourceData[node.roundIndexToSend].minDistance)) {
-          node.roundIndexToSend = rIndex;
-      } else if (node.sourceData[rIndex].minDistance ==
-                 node.sourceData[node.roundIndexToSend].minDistance) {
-        if (rIndex < node.roundIndexToSend) {
-          node.roundIndexToSend = rIndex;
+      // if received distance is smaller than current candidate for sending,
+      // send it out instead (if tie breaker wins i.e. lower in position)
+      if (roundIndexToSend == infinity ||
+          (sourceData[rIndex].minDistance <
+           sourceData[roundIndexToSend].minDistance)) {
+        roundIndexToSend = rIndex;
+      } else if (sourceData[rIndex].minDistance ==
+                 sourceData[roundIndexToSend].minDistance) {
+        if (rIndex < roundIndexToSend) {
+          roundIndexToSend = rIndex;
         }
       }
 
@@ -99,27 +114,40 @@ struct APSPReduce {
 
   static bool reduce_batch(unsigned, uint8_t*, DataCommMode) { return false; }
 
-  static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) { return false; }
+  static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {
+    return false;
+  }
 
   // reset the number of shortest paths (the master will now have it)
-  static void reset(uint32_t, struct NodeData &node) {
-    if (node.roundIndexToSend != infinity) {
-      node.sourceData[node.roundIndexToSend].shortPathCount = 0;
+  template <typename Graph>
+  static void reset(uint32_t node_id, Graph& g) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+
+    if (roundIndexToSend != infinity) {
+      sourceData[roundIndexToSend].shortPathCount = 0;
     }
   }
 
-  static void setVal(uint32_t, struct NodeData & node, ValTy y) {
+  template <typename Graph>
+  static void setVal(uint32_t node_id, Graph& g, ValTy y) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+    auto& dTree = g.template getDataIndex<NODE_DATA_D_TREE>(node_id);
+
     uint32_t rIndex = y.first;
     if (rIndex != infinity) {
-      uint32_t rDistance = y.second;
+      uint32_t rDistance      = y.second;
       ShortPathType rNumPaths = y.third;
 
       // values from master are canonical ones for this round
-      node.roundIndexToSend = rIndex;
-      uint32_t oldDistance = node.sourceData[rIndex].minDistance;
-      node.sourceData[rIndex].minDistance = rDistance;
-      node.sourceData[rIndex].shortPathCount = rNumPaths;
-      node.dTree.setDistance(rIndex, oldDistance, rDistance);
+      roundIndexToSend                  = rIndex;
+      uint32_t oldDistance              = sourceData[rIndex].minDistance;
+      sourceData[rIndex].minDistance    = rDistance;
+      sourceData[rIndex].shortPathCount = rNumPaths;
+      dTree.setDistance(rIndex, oldDistance, rDistance);
     }
   }
 
@@ -131,11 +159,16 @@ struct APSPReduce {
 struct DependencyReduce {
   using ValTy = galois::Pair<uint32_t, float>;
 
-  static ValTy extract(uint32_t, struct NodeData& node) {
-    uint32_t indexToGet = node.roundIndexToSend;
+  template <typename Graph>
+  static ValTy extract(uint32_t node_id, Graph& g) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+
+    uint32_t indexToGet = roundIndexToSend;
     float thing;
     if (indexToGet != infinity) {
-      thing = node.sourceData[indexToGet].dependencyValue;
+      thing = sourceData[indexToGet].dependencyValue;
     } else {
       thing = 0;
     }
@@ -143,27 +176,34 @@ struct DependencyReduce {
     return ValTy(indexToGet, thing);
   }
 
-  static bool extract_batch(unsigned, uint8_t*, size_t*,
-                            DataCommMode*) { return false; }
+  static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {
+    return false;
+  }
 
   static bool extract_batch(unsigned, uint8_t*) { return false; }
 
-  static bool extract_reset_batch(unsigned, uint8_t*, size_t*,
-                                  DataCommMode*) { return false; }
+  static bool extract_reset_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {
+    return false;
+  }
 
   static bool extract_reset_batch(unsigned, uint8_t*) { return false; }
 
-  static bool reduce(uint32_t, struct NodeData& node, ValTy y) {
+  template <typename Graph>
+  static bool reduce(uint32_t node_id, Graph& g, ValTy y) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+
     uint32_t rIndex = y.first;
 
     if (rIndex != infinity) {
-      if (node.roundIndexToSend != rIndex) {
-        galois::gError(node.roundIndexToSend, " ", rIndex);
+      if (roundIndexToSend != rIndex) {
+        galois::gError(roundIndexToSend, " ", rIndex);
       }
-      assert(node.roundIndexToSend == rIndex);
+      assert(roundIndexToSend == rIndex);
 
       float rToAdd = y.second;
-      galois::atomicAdd(node.sourceData[rIndex].dependencyValue, rToAdd);
+      galois::atomicAdd(sourceData[rIndex].dependencyValue, rToAdd);
       return true;
     }
 
@@ -172,21 +212,31 @@ struct DependencyReduce {
 
   static bool reduce_batch(unsigned, uint8_t*, DataCommMode) { return false; }
 
-  static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) { return false; }
+  static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {
+    return false;
+  }
 
   // reset the number of shortest paths (the master will now have it)
-  static void reset(uint32_t, struct NodeData &node) {
-    if (node.roundIndexToSend != infinity) {
-      node.sourceData[node.roundIndexToSend].dependencyValue = 0;
+  template <typename Graph>
+  static void reset(uint32_t node_id, Graph& g) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+    auto& roundIndexToSend =
+        g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id);
+
+    if (roundIndexToSend != infinity) {
+      sourceData[roundIndexToSend].dependencyValue = 0;
     }
   }
 
-  static void setVal(uint32_t, struct NodeData & node, ValTy y) {
+  template <typename Graph>
+  static void setVal(uint32_t node_id, Graph& g, ValTy y) {
+    auto& sourceData = g.template getDataIndex<NODE_DATA_SOURCE_DATA>(node_id);
+
     uint32_t rIndex = y.first;
     if (rIndex != infinity) {
       float rDep = y.second;
-      assert(node.roundIndexToSend == rIndex);
-      node.sourceData[rIndex].dependencyValue = rDep;
+      assert(g.template getDataIndex<NODE_DATA_ROUND_INDEX_TO_SEND>(node_id) == rIndex);
+      sourceData[rIndex].dependencyValue = rDep;
     }
   }
 

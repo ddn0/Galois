@@ -23,7 +23,7 @@
  * Contains implementations of the bitvector status setter/getter functions
  */
 
-#include <galois/runtime/SyncStructures.h>
+#include <galois/runtime/BitVector.h>
 
 using namespace galois::runtime; // for easy access to BITVECTOR_STATUS
 

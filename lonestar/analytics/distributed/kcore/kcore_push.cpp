@@ -66,11 +66,14 @@ static cll::opt<Exec> execution(
 /* Graph structure declarations + other inits */
 /******************************************************************************/
 
-struct NodeData {
-  std::atomic<uint32_t> current_degree;
-  std::atomic<uint32_t> trim;
-  uint8_t flag;
+enum {
+  NODE_DATA_CURRENT_DEGREE,
+  NODE_DATA_TRIM,
+  NODE_DATA_FLAG,
 };
+
+using NodeData =
+    std::tuple<std::atomic<uint32_t>, std::atomic<uint32_t>, uint8_t>;
 
 typedef galois::graphs::DistGraph<NodeData, void> Graph;
 typedef typename Graph::GraphNode GNode;
@@ -126,12 +129,12 @@ struct InitializeGraph2 {
    * adding for every dest */
   void operator()(GNode src) const {
     for (auto current_edge : graph->edges(src)) {
-      GNode dest_node = graph->getEdgeDst(current_edge);
+      GNode dst            = graph->getEdgeDst(current_edge);
+      auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(dst);
 
-      NodeData& dest_data = graph->getData(dest_node);
-      galois::atomicAdd(dest_data.current_degree, (uint32_t)1);
+      galois::atomicAdd(current_degree, uint32_t{1});
 
-      bitset_current_degree.set(dest_node);
+      bitset_current_degree.set(dst);
     }
   }
 };
@@ -171,10 +174,13 @@ struct InitializeGraph1 {
 
   /* Setup intial fields */
   void operator()(GNode src) const {
-    NodeData& src_data      = graph->getData(src);
-    src_data.flag           = true;
-    src_data.trim           = 0;
-    src_data.current_degree = 0;
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
+    auto& trim           = graph->getDataIndex<NODE_DATA_TRIM>(src);
+    auto& flag           = graph->getDataIndex<NODE_DATA_FLAG>(src);
+
+    current_degree = 0;
+    flag           = true;
+    trim           = 0;
   }
 };
 
@@ -207,17 +213,19 @@ struct KCoreStep2 {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
+    auto& trim           = graph->getDataIndex<NODE_DATA_TRIM>(src);
+    auto& flag           = graph->getDataIndex<NODE_DATA_FLAG>(src);
 
     // we currently do not care about degree for dead nodes,
     // so we ignore those (i.e. if flag isn't set, do nothing)
-    if (src_data.flag) {
-      if (src_data.trim > 0) {
-        src_data.current_degree = src_data.current_degree - src_data.trim;
+    if (flag) {
+      if (trim > 0) {
+        current_degree = current_degree - trim;
       }
     }
 
-    src_data.trim = 0;
+    trim = 0;
   }
 };
 
@@ -290,22 +298,23 @@ struct KCoreStep1 {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& current_degree = graph->getDataIndex<NODE_DATA_CURRENT_DEGREE>(src);
+    auto& flag           = graph->getDataIndex<NODE_DATA_FLAG>(src);
 
     // only if node is alive we do things
-    if (src_data.flag) {
-      if (src_data.current_degree < local_k_core_num) {
+    if (flag) {
+      if (current_degree < local_k_core_num) {
         // set flag to 0 (false) and increment trim on outgoing neighbors
         // (if they exist)
-        src_data.flag = false;
+        flag = false;
         active_vertices += 1; // can be optimized: node may not have edges
 
         for (auto current_edge : graph->edges(src)) {
           GNode dst = graph->getEdgeDst(current_edge);
 
-          auto& dst_data = graph->getData(dst);
+          auto& dst_trim = graph->getDataIndex<NODE_DATA_TRIM>(dst);
 
-          galois::atomicAdd(dst_data.trim, (uint32_t)1);
+          galois::atomicAdd(dst_trim, uint32_t{1});
           bitset_trim.set(dst);
         }
       }
@@ -355,9 +364,9 @@ struct KCoreSanityCheck {
 
   /* Check if an owned node is alive/dead: increment appropriate accumulator */
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& flag = graph->getDataIndex<NODE_DATA_FLAG>(src);
 
-    if (src_data.flag) {
+    if (flag) {
       active_vertices += 1;
     }
   }
@@ -372,7 +381,8 @@ std::vector<uint8_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).flag);
+    auto& flag = hg->getDataIndex<NODE_DATA_FLAG>(node);
+    values.push_back(flag);
   }
 
   return values;

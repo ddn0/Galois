@@ -47,9 +47,8 @@ static cll::opt<unsigned int> maxIterations("maxIterations",
                                             cll::desc("Maximum iterations: "
                                                       "Default 1000"),
                                             cll::init(1000));
-static cll::opt<unsigned long long>
-    src_node("startNode", // not uint64_t due to a bug in llvm cl
-             cll::desc("ID of the source node"), cll::init(0));
+static cll::opt<uint64_t>
+    src_node("startNode", cll::desc("ID of the source node"), cll::init(0));
 
 enum Exec { Sync, Async };
 
@@ -65,9 +64,11 @@ static cll::opt<Exec> execution(
 
 const uint32_t infinity = std::numeric_limits<uint32_t>::max() / 4;
 
-struct NodeData {
-  uint32_t dist_current;
+enum {
+  NODE_DATA_DIST_CURRENT,
 };
+
+using NodeData = std::tuple<uint32_t>;
 
 galois::DynamicBitSet bitset_dist_current;
 
@@ -84,11 +85,11 @@ galois::graphs::GluonSubstrate<Graph>* syncSubstrate;
 
 struct InitializeGraph {
   const uint32_t& local_infinity;
-  cll::opt<unsigned long long>& local_src_node;
+  cll::opt<uint64_t>& local_src_node;
   Graph* graph;
 
-  InitializeGraph(cll::opt<unsigned long long>& _src_node,
-                  const uint32_t& _infinity, Graph* _graph)
+  InitializeGraph(cll::opt<uint64_t>& _src_node, const uint32_t& _infinity,
+                  Graph* _graph)
       : local_infinity(_infinity), local_src_node(_src_node), graph(_graph) {}
 
   void static go(Graph& _graph) {
@@ -114,9 +115,8 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
-    sdata.dist_current =
-        (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
+    dist_current = (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
   }
 };
 
@@ -179,13 +179,13 @@ struct SSSP {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
 
     for (auto jj : graph->edges(src)) {
-      GNode dst         = graph->getEdgeDst(jj);
-      auto& dnode       = graph->getData(dst);
-      uint32_t new_dist = dnode.dist_current + graph->getEdgeData(jj);
-      uint32_t old_dist = galois::min(snode.dist_current, new_dist);
+      GNode dst              = graph->getEdgeDst(jj);
+      auto& dst_dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(dst);
+      uint32_t new_dist      = dst_dist_current + graph->getEdgeData(jj);
+      uint32_t old_dist      = galois::min(dist_current, new_dist);
       if (old_dist > new_dist) {
         bitset_dist_current.set(src);
         active_vertices += 1;
@@ -257,12 +257,12 @@ struct SSSPSanityCheck {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
 
-    if (src_data.dist_current < local_infinity) {
+    if (dist_current < local_infinity) {
       DGAccumulator_sum += 1;
-      DGMax.update(src_data.dist_current);
-      dg_avg += src_data.dist_current;
+      DGMax.update(dist_current);
+      dg_avg += dist_current;
     }
   }
 };
@@ -276,7 +276,8 @@ std::vector<uint32_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).dist_current);
+    auto& dist_current = hg->getDataIndex<NODE_DATA_DIST_CURRENT>(node);
+    values.push_back(dist_current);
   }
 
   return values;

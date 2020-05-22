@@ -23,13 +23,13 @@
 // current_degree
 ////////////////////////////////////////////////////////////////////////////////
 
-GALOIS_SYNC_STRUCTURE_REDUCE_ADD(current_degree, uint32_t);
-GALOIS_SYNC_STRUCTURE_REDUCE_SET(current_degree, uint32_t);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_ADD(current_degree, NODE_DATA_CURRENT_DEGREE, uint32_t);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_SET(current_degree, NODE_DATA_CURRENT_DEGREE, uint32_t);
 GALOIS_SYNC_STRUCTURE_BITSET(current_degree);
 
 ////////////////////////////////////////////////////////////////////////////////
 // trim
 ////////////////////////////////////////////////////////////////////////////////
 
-GALOIS_SYNC_STRUCTURE_REDUCE_ADD(trim, uint32_t);
+GALOIS_SYNC_STRUCTURE_INDEX_REDUCE_ADD(trim, NODE_DATA_TRIM, uint32_t);
 GALOIS_SYNC_STRUCTURE_BITSET(trim);

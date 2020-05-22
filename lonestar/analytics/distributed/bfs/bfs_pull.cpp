@@ -66,9 +66,11 @@ static cll::opt<Exec> execution(
 
 const uint32_t infinity = std::numeric_limits<uint32_t>::max() / 4;
 
-struct NodeData {
-  uint32_t dist_current;
+enum {
+  NODE_DATA_DIST_CURRENT,
 };
+
+using NodeData = std::tuple<uint32_t>;
 
 typedef galois::graphs::DistGraph<NodeData, void> Graph;
 typedef typename Graph::GraphNode GNode;
@@ -115,9 +117,8 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
-    sdata.dist_current =
-        (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
+    dist_current = (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
   }
 };
 
@@ -178,13 +179,13 @@ struct BFS {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
 
     for (auto jj : graph->edges(src)) {
-      GNode dst         = graph->getEdgeDst(jj);
-      auto& dnode       = graph->getData(dst);
-      uint32_t new_dist = dnode.dist_current + 1;
-      uint32_t old_dist = galois::min(snode.dist_current, new_dist);
+      GNode dst              = graph->getEdgeDst(jj);
+      auto& dst_dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(dst);
+      uint32_t new_dist      = dst_dist_current + 1;
+      uint32_t old_dist      = galois::min(dist_current, new_dist);
       if (old_dist > new_dist) {
         bitset_dist_current.set(src);
         active_vertices += 1;
@@ -246,11 +247,11 @@ struct BFSSanityCheck {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
 
-    if (src_data.dist_current < local_infinity) {
+    if (dist_current < local_infinity) {
       DGAccumulator_sum += 1;
-      DGMax.update(src_data.dist_current);
+      DGMax.update(dist_current);
     }
   }
 };
@@ -264,7 +265,8 @@ std::vector<uint32_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).dist_current);
+    auto& dist_current = hg->getDataIndex<NODE_DATA_DIST_CURRENT>(node);
+    values.push_back(dist_current);
   }
 
   return values;

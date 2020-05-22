@@ -71,10 +71,12 @@ static cll::opt<Exec> execution(
 
 const uint32_t infinity = std::numeric_limits<uint32_t>::max() / 4;
 
-struct NodeData {
-  std::atomic<uint32_t> dist_current;
-  uint32_t dist_old;
+enum {
+  NODE_DATA_DIST_CURRENT,
+  NODE_DATA_DIST_OLD,
 };
+
+using NodeData = std::tuple<std::atomic<uint32_t>, uint32_t>;
 
 galois::DynamicBitSet bitset_dist_current;
 
@@ -122,11 +124,10 @@ struct InitializeGraph {
   }
 
   void operator()(GNode src) const {
-    NodeData& sdata = graph->getData(src);
-    sdata.dist_current =
-        (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
-    sdata.dist_old =
-        (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
+    auto& dist_old     = graph->getDataIndex<NODE_DATA_DIST_OLD>(src);
+    dist_current = (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
+    dist_old     = (graph->getGID(src) == local_src_node) ? 0 : local_infinity;
   }
 };
 
@@ -173,14 +174,16 @@ struct FirstItr_BFS {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
-    snode.dist_old  = snode.dist_current;
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
+    auto& dist_old     = graph->getDataIndex<NODE_DATA_DIST_OLD>(src);
+
+    dist_old = dist_current;
 
     for (auto jj : graph->edges(src)) {
-      GNode dst         = graph->getEdgeDst(jj);
-      auto& dnode       = graph->getData(dst);
-      uint32_t new_dist = 1 + snode.dist_current;
-      uint32_t old_dist = galois::atomicMin(dnode.dist_current, new_dist);
+      GNode dst              = graph->getEdgeDst(jj);
+      auto& dst_dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(dst);
+      uint32_t new_dist      = 1 + dist_current;
+      uint32_t old_dist      = galois::atomicMin(dst_dist_current, new_dist);
       if (old_dist > new_dist)
         bitset_dist_current.set(dst);
     }
@@ -266,21 +269,23 @@ struct BFS {
   }
 
   void operator()(GNode src) const {
-    NodeData& snode = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
+    auto& dist_old     = graph->getDataIndex<NODE_DATA_DIST_OLD>(src);
 
-    if (snode.dist_old > snode.dist_current) {
+    if (dist_old > dist_current) {
       active_vertices += 1;
 
-      if (local_priority > snode.dist_current) {
-        snode.dist_old = snode.dist_current;
+      if (local_priority > dist_current) {
+        dist_old = dist_current;
 
         for (auto jj : graph->edges(src)) {
           work_edges += 1;
 
-          GNode dst         = graph->getEdgeDst(jj);
-          auto& dnode       = graph->getData(dst);
-          uint32_t new_dist = 1 + snode.dist_current;
-          uint32_t old_dist = galois::atomicMin(dnode.dist_current, new_dist);
+          GNode dst = graph->getEdgeDst(jj);
+          auto& dst_dist_current =
+              graph->getDataIndex<NODE_DATA_DIST_CURRENT>(dst);
+          uint32_t new_dist = 1 + dist_current;
+          uint32_t old_dist = galois::atomicMin(dst_dist_current, new_dist);
           if (old_dist > new_dist)
             bitset_dist_current.set(dst);
         }
@@ -342,11 +347,11 @@ struct BFSSanityCheck {
   }
 
   void operator()(GNode src) const {
-    NodeData& src_data = graph->getData(src);
+    auto& dist_current = graph->getDataIndex<NODE_DATA_DIST_CURRENT>(src);
 
-    if (src_data.dist_current < local_infinity) {
+    if (dist_current < local_infinity) {
       DGAccumulator_sum += 1;
-      DGMax.update(src_data.dist_current);
+      DGMax.update(dist_current);
     }
   }
 };
@@ -360,7 +365,8 @@ std::vector<uint32_t> makeResultsCPU(Graph* hg) {
 
   values.reserve(hg->numMasters());
   for (auto node : hg->masterNodesRange()) {
-    values.push_back(hg->getData(node).dist_current);
+    auto& dist_current = hg->getDataIndex<NODE_DATA_DIST_CURRENT>(node);
+    values.push_back(dist_current);
   }
 
   return values;
